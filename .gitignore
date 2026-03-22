@@ -1,4 +1,6 @@
 myenv/
+venv_win/
+.venv/
 %USERPROFILE%
 data/
 __pycache__

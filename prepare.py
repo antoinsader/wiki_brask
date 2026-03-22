@@ -24,6 +24,47 @@ descriptions_max_length = 128
 rel_embs_batch_size = 8192 if use_cuda else 32
 
 
+def choose_random_ids(ids_list, n):
+    """Choose n random ids from the list of ids that have triples, aliases and descriptions."""
+    tr_raw_fp = settings.RAW_FILES.TRIPLES_TRAIN
+
+    _ids_has_everything = ids_list
+
+
+    triple_heads = set()
+    t_rs = set()
+    with open(tr_raw_fp, "r", encoding="utf-8") as f:
+        for line in tqdm(f, desc="Choosing ids"):
+            parts = line.strip().split("\t")
+            if len(parts) == 3:
+                triple_heads.add(parts[0])
+                t_rs.add((parts[0], parts[1]))
+
+
+
+    _ids_has_everything = [i for i in _ids_has_everything if i in triple_heads]
+
+    aliases_all = data_loader.get_aliases(minimized=False)
+    aliases_ids = set(aliases_all.keys())
+    _ids_has_everything = [i for i in _ids_has_everything if i in aliases_ids]
+    del aliases_all, aliases_ids
+
+    descriptions_all = data_loader.get_descriptions(minimized=False)
+    descriptions_ids = set(descriptions_all.keys())
+    _ids_has_everything = [i for i in _ids_has_everything if i in descriptions_ids]
+    del descriptions_all, descriptions_ids
+
+    rels_all = data_loader.get_relations(minimized=False)
+    head_ids_not_exists_in_rels = [ h for h,r in t_rs if r not in rels_all ]
+    _ids_has_everything = [i for i in _ids_has_everything if i not in head_ids_not_exists_in_rels]
+    del rels_all, head_ids_not_exists_in_rels
+
+    if len(_ids_has_everything) < n:
+        return _ids_has_everything
+    return set(random.sample(_ids_has_everything, n))
+
+
+
 
 def minimize(minimized_triples_ids):
 
@@ -52,7 +93,14 @@ def minimize(minimized_triples_ids):
 
     print("minimizing aliases")
     aliases_all = data_loader.get_aliases(minimized=False)
-    aliases_min = {k:v for k,v in aliases_all.items() if k in minimized_triples_ids or k in tails_entity_ids_min}
+    aliases_min = {}
+    for ent_id, als_lst in aliases_all.items():
+        if ent_id not in minimized_triples_ids and ent_id not in tails_entity_ids_min:
+            continue
+        _lst = [als for als in als_lst if als.strip() != ""]
+        if _lst:
+            aliases_min[ent_id] = _lst
+
     cache_array(aliases_min, min_files.ALIASES)
     print(f"\t Aliases minimization finished: {len(aliases_min):,} -> {min_files.ALIASES}")
     del aliases_all, aliases_min, tails_entity_ids_min
@@ -149,7 +197,9 @@ def normalize():
     with tqdm(total=total_items, desc="Normalizing") as pbar:
         for als_id, als_lst in aliases.items():
             for als_str in als_lst:
-                norm_aliases[als_id].add(normalizer(als_str))
+                norm = normalizer(als_str)
+                if norm.strip() != "":
+                    norm_aliases[als_id].add(norm)
             pbar.update(len(als_lst))
     del aliases
     norm_aliases = {k: list(v) for k, v in norm_aliases.items()}
@@ -228,7 +278,7 @@ def main():
         if minmized_n_triples == 0:
             return
 
-        minimized_triples_ids = set(random.sample(list(all_triples_ids), minmized_n_triples))
+        minimized_triples_ids = choose_random_ids(all_triples_ids, minmized_n_triples)
         minimize(minimized_triples_ids)
         print("Finished minimization.. ")
     else:

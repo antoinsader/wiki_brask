@@ -1,10 +1,10 @@
-import nltk 
-import re
-
+from tqdm import tqdm
 import sys
 import time
+import re
+
+
 import math
-import msvcrt
 
 
 def get_strange_chars():
@@ -38,7 +38,8 @@ def get_strange_chars():
             r"[&]": "and",
         }.items()]
 
-def get_stop_words(self) -> set:
+def get_stop_words() -> set:
+    import nltk 
     nltk.download("stopwords")
     stop_words = set(nltk.corpus.stopwords.words("english"))
     return stop_words
@@ -58,6 +59,8 @@ def ask_factor(prompt):
 
 def timed_input(prompt, timeout=15, default="y"):
     """Prompt the user with a countdown. Returns default if no answer within timeout."""
+    import msvcrt
+   
     print(prompt)
     chars = []
     end_time = time.time() + timeout
@@ -91,3 +94,15 @@ def timed_input(prompt, timeout=15, default="y"):
 
         time.sleep(0.05)
 
+
+def create_aliases_patterns_map(aliases : dict) -> dict[str, re.Pattern]:
+    """Creates a map of alias strings to regex patterns that match them."""
+    patterns_map = {}
+    for als_lst in tqdm(aliases.values(), desc="creating aliases patterns map"):
+        for als_str in als_lst:
+            escaped = re.escape(als_str)
+            flexible = escaped.replace(r'\ ', r'\s+')
+            pattern = rf"(?<!\w){flexible}(?!\w)"
+            patterns_map[als_str] = re.compile(pattern, flags=re.IGNORECASE)
+    del aliases
+    return patterns_map

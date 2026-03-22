@@ -105,8 +105,18 @@ Thus, for each  `entity_id` we will have a list of tuples, each tuple having `(h
 
 > Processing is parallelised across triples chunks via `multiprocessing.Pool`.
 
+> The script will remove triples from `training triples` where a corresponding golden triple was not found (might be because the truncated description does not include this triple).
 
-**Output:** gold label files containing per-triple head and tail span positions, mapped to token indices, saved to the minimized data directory.
+> The script will remove `description entity` if no golden triples for this entity was found. 
+
+> Currently, the script will extract entities spans based on regex patterns of the aliases. so if the triple tail is `herman (given name)`, this tail will not be recorded if the description does not contain `herman (given name)`
+
+> Current regex pattern for detecting aliases inside descriptions is: `rf"(?<!\w){  re.escape(<ALIAS NAME>).replace(r'\ ', r'\s+')  }(?!\w)"`, you can modify this inside `utils/helpers.py: create_aliases_patterns_map`
+
+> IMPORTANT NOTICE: If the description is "Rome is the capital city of Italy, Italy is a beautiful country", and the original triples are [(Rome, capital of, Italy)], the golden triples for this description would be [(  (0,0), capital of, (6,6) ), (0,0), capital of, (7,7) ]. Which means the object `Italy` because it was found 2 times in description, it will be two times in the golden triples. Keeping this behavior currently allowing the `entity extractor` to be evaluated correctly. 
+
+
+**Output:** gold label files containing per-triple head and tail span positions, mapped to token indices, saved to the minimized data directory. Also overwriting `descriptions`, `description embeddings files `, `triples` to have only those entities that have `golden triples`
 
 > If you want to take a look at what the golden triples generated, you can run the script: 
 
@@ -126,6 +136,50 @@ The log will show details for each entity -> (1) tokens (2) train triples (showi
 Example one entry from the log:
 
 ```golden_triples.log
+
+Description id: Q5473840 
+Description text:  
+Fosterella spectabilis is a bromeliad species in the genus Fosterella. This species is endemic to Bolivia. 
+Fosterella spectabilis is a bromeliad species in the genus Fosterella. This species is endemic to Bolivia. 
+Description tokens:  
+['[CLS]', 'foster', '##ella', 'spec', '##ta', '##bilis', 'is', 'a', 'bro', '##mel', '##iad', 'species', 'in', 'the', 'genus', 'foster', '##ella', '.', 'this', 'species', 'is', 'endemic', 'to', 'bolivia', '.', '[SEP]', '[PAD]', '[PAD]', '[PAD]', '[PAD]', '[PAD]', '[PAD]', '[PAD]', '[PAD]', '[PAD]', ....] 
+------------------------------- 
+ORIGINAL TRIPLES (3):  
+	Original triple number 1:  
+		Head aliases: ['fosterella spectabilis'] 
+		Relation: ['taxon rank', 'taxonomic rank', 'rank', 'type of taxon'] (P105) 
+		Tail aliases: ['mayr species', 'barcode species', 'nominal species', 'morphological species', 'biological species', 'species (taxonomy)', 'ecological species', 'species (biology)', 'cohesion species', 'phylogenetic species concept', 'phylogenetic species', 'reproductive species', 'species delimitation', 'organism mnemonic', 'genetic species', 'spp.', 'biospecies', 'cladistic species', 'morphospecies', 'isolation species', 'speceis', 'undiscovered species', 'phenetic species', 'species', 'species pluralis', 'genetic similarity species', 'typological species', 'animal species', 'species and speciation', 'species (biological)', 'vavilovian species', 'evolutionary species', 'theory of species', 'recognition species'] 
+	Original triple number 2:  
+		Head aliases: ['fosterella spectabilis'] 
+		Relation: ['parent taxon', 'taxon parent', 'higher taxon'] (P171) 
+		Tail aliases: ['fosterella'] 
+	Original triple number 3:  
+		Head aliases: ['fosterella spectabilis'] 
+		Relation: ['instance of', 'is a', 'is an', 'has class', 'has type', 'is a particular', 'is a specific', 'is an individual', 'is a unique', 'is an example of', 'member of', 'unique individual of', 'distinct member of', 'non-type member of', 'unsubclassable example of', 'uninstantiable instance of', 'unsubclassifiable member of', 'not a type but is instance of', 'unsubtypable particular', 'unitary element of class', 'distinct element of', 'distinct individual member of', 'occurrence of', 'rdf:type', 'type'] (P31) 
+		Tail aliases: ['fish taxa', 'taxon', 'taxum', 'polytypic taxon', 'taxonomic group', 'supertaxon', 'subtaxon', 'taxxon', 'taxa'] 
+------------------------------- 
+Golden Triples (4):  
+	Head  
+	Triple 1:  
+		Head: ['foster', '##ella', 'spec', '##ta', '##bilis']   
+		Relation: ['taxon rank', 'taxonomic rank', 'rank', 'type of taxon'] (P105) 
+		Tail: ['species']   
+	Head  
+	Triple 2:  
+		Head: ['foster', '##ella', 'spec', '##ta', '##bilis']   
+		Relation: ['taxon rank', 'taxonomic rank', 'rank', 'type of taxon'] (P105) 
+		Tail: ['species']   
+	Head  
+	Triple 3:  
+		Head: ['foster', '##ella', 'spec', '##ta', '##bilis']   
+		Relation: ['parent taxon', 'taxon parent', 'higher taxon'] (P171) 
+		Tail: ['foster', '##ella']   
+	Head  
+	Triple 4:  
+		Head: ['foster', '##ella', 'spec', '##ta', '##bilis']   
+		Relation: ['parent taxon', 'taxon parent', 'higher taxon'] (P171) 
+		Tail: ['foster', '##ella']   
+
 
 ```
 
