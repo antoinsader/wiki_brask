@@ -253,24 +253,29 @@ def embed_descriptions():
     tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     model = AutoModel.from_pretrained('bert-base-cased')
 
-    success = get_descriptions_embedding(
+    mean_embs, all_embs, all_masks = get_descriptions_embedding(
         tokenizer=tokenizer, 
         model=model, 
         sentences= sentences, 
         device=device, 
         use_cuda=use_cuda, 
-        max_length=descriptions_max_length,
-        desc_ids = list(descriptions.keys()),
-        out_mean_embs=out_mean_embs,
-        out_all_embs=out_all_embs,
-        out_all_masks=out_all_masks,
-        out_ids=out_ids
-        )
+        max_length=descriptions_max_length)
 
-    if success:
-        print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_all_masks}, {out_ids}")
+    print(f"mean_embs shape: {mean_embs.shape} should be (N, H) ({len(descriptions)}, 768)")
+    print(f"mean_embs shape: {all_embs.shape} should be (N, L, H) ({len(descriptions)}, {descriptions_max_length},  768)")
+    
+    save_tensor(mean_embs, out_mean_embs)
+    del mean_embs
+    save_tensor(all_embs, out_all_embs)
+    del all_embs
+    save_tensor(all_masks, out_all_masks)
+    del all_masks
+    
+    cache_array(list(descriptions.keys()), out_ids)
 
-    return success
+    print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_all_masks}, {out_ids}")
+
+    return True
 
 def main():
     answer = timed_input("Do you want to perform minimization on dictionaries? [Y/n]")
