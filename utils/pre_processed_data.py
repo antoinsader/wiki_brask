@@ -81,10 +81,10 @@ class RawDataLoader:
             raise FileNotFoundError(f"Minimized cache not found: {pkl_fp}. Run minimize.py first.")
         return read_cached_array(pkl_fp)
 
-    def _get_minimized_tensor(self, tensor_fp):
+    def _get_minimized_tensor(self, tensor_fp, mmap=False):
         if not os.path.isfile(tensor_fp):
             raise FileNotFoundError(f"Minimized cache not found: {tensor_fp}. Run minimize.py first.")
-        return read_tensor(tensor_fp)
+        return read_tensor(tensor_fp, mmap=mmap)
 
 
     def get_triples_train(self, minimized=False) -> dict:
@@ -123,7 +123,7 @@ class RawDataLoader:
         return self._get_minimized(self.min.GOLD_TRIPLES)
 
     def get_description_embeddings_all(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        description_embs_all = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDINGS_ALL)
+        description_embs_all = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDINGS_ALL, True)
         description_embs_ids = self._get_minimized(self.min.DESCRIPTION_EMBEDDINGS_IDS)
         description_embs_masks = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDING_ALL_MASKS)
         return description_embs_all, description_embs_ids, description_embs_masks
