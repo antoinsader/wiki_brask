@@ -2,13 +2,15 @@
 # (forward_head_start, forward_head_end, backward_tail_start, backward_tail_end) each is a tensor with shape (B, L, 1) having 0,1 values
 # (forward_tail_start, forward_tail_end, backward_head_start, backward_tail_end) each is a tensor with shape (B, R, S, L, 1) where S is maximum number of heads for forward, maximum number of tails for backward
 
-import os
 
+import json
+import os
+import pickle
+from sympy import EX
 import torch
-import re
-from collections import defaultdict
 import numpy as np
-from multiprocessing import Pool
+from collections import defaultdict
+from multiprocessing import Pool, shared_memory
 from tqdm import tqdm
 
 from operations.tokenizer import tokenize
@@ -22,20 +24,45 @@ from utils.helpers import create_aliases_patterns_map
 # For multiprocessing
 _ALIASES_PATTERNS_MAP = None
 _ALIASES_DICT = None
+_DESCRIPTIONS = None
 
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
+def share_dict(d: dict) -> tuple[shared_memory.SharedMemory, int]:
+    """Serialize dictionary and store it in shared memory. to not being serialized for each process"""
+    encoded = pickle.dumps(d, protocol=5)
+    size = len(encoded)
+    shm = shared_memory.SharedMemory(create=True, size=size)
+    shm.buf[:size] = encoded
+    return shm, size
 
 
-
-def init_worker_discover_aliases(aliases_patterns_map, aliases_dict: dict):
-    global   _ALIASES_PATTERNS_MAP, _ALIASES_DICT
+def init_worker_discover_aliases(
+        aliases_patterns_map, 
+        shm_aliases_name, 
+        shm_aliases_size, 
+        shm_descriptions_name, 
+        shm_descriptions_size):
+    """Initializer for worker processes in discover_aliases. Loads shared memory data into global variables."""
+    global   _ALIASES_PATTERNS_MAP, _ALIASES_DICT, _DESCRIPTIONS
     _ALIASES_PATTERNS_MAP = aliases_patterns_map
-    _ALIASES_DICT = aliases_dict
+
+    shm_aliases = shared_memory.SharedMemory(name=shm_aliases_name)
+
+    _ALIASES_DICT = pickle.loads(bytes(shm_aliases.buf[:shm_aliases_size]))
+    shm_aliases.close()
+
+    shm_descriptions = shared_memory.SharedMemory(name=shm_descriptions_name)
+    _DESCRIPTIONS = pickle.loads(bytes(shm_descriptions.buf[:shm_descriptions_size]))
+    shm_descriptions.close()
 
 
-def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: list,descriptions_chunk: dict, max_descriptions_length: int):
+def chunk_description_discover_aliases_spans(
+        process_idx: int,
+        triples_chunk: list, 
+        max_descriptions_length: int
+    ) -> tuple[dict, dict]:
     """Discover triple_spans for each triple in the chunk, triple_spans is a dict {head_entity_id: [(head_start_idx, head_end_idx, rel_idx, tail_start_idx, tail_end_idx), ... for each triple with this head]} 
     Parameters:
     ----------
@@ -43,20 +70,23 @@ def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: lis
 
     Returns:
     ----------
-    head_spans: dict {entity_id: [(head_start, head_end)... for each head]}
-    tail_spans: dict {entity_id: [(tail_start, tail_end)... for each tail]}
+    tuple: [triple_spans: dict, not_found_triples: dict]
+        triple_spans: dict {head_entity_id: [(head_start_idx, head_end_idx, rel_idx, tail_start_idx, tail_end_idx), ... for each triple with this head]}
+        not_found_triples: dict {head_entity_id: [(relation_id, tail_entity_id), ... for each triple with this head that its head aliases or tail aliases were not found in the description]}
     """
     not_found_triples = defaultdict(list)
     triples_head_ids = set([t[0] for t in triples_chunk ])
-    descriptions = {k:v for k,v in descriptions_chunk.items() if k in triples_head_ids}
-    descriptions_ids = list(descriptions.keys())
-    descriptions_texts = list(descriptions.values())
+
+    descriptions = {k:  _DESCRIPTIONS[k] for k in triples_head_ids if k in _DESCRIPTIONS}
+    description_idx_map = {entity_id: idx for idx, entity_id in enumerate(descriptions.keys())}
+
+
     print(f"[PROCESS_{process_idx}]: Tokenizing")
-    enc = tokenize(descriptions_texts, max_descriptions_length)
+    enc = tokenize(list(descriptions.values()), max_descriptions_length)
     triple_spans = defaultdict(list)  # h -> [(head_spans, rel_idx, tail_spans), ...]
     print(f"[PROCESS_{process_idx}]: extracting")
 
-    description_idx_map = {entity_id: idx for idx, entity_id in enumerate(descriptions_ids)}
+
 
     triples_by_head = defaultdict(list)
     for h, r, t in triples_chunk:
@@ -64,12 +94,12 @@ def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: lis
             triples_by_head[h].append((r, t))
 
     for h, related_triples in tqdm(triples_by_head.items(), desc=f"[PROCESS_{process_idx}] Extracting aliases from triples"):
+        description_text = descriptions[h]
         description_idx = description_idx_map[h]
-        description_text = descriptions_texts[description_idx]
 
         # Compute head spans once per head entity
         head_spans_found = set()
-        if h not in _ALIASES_DICT or t not in _ALIASES_DICT:
+        if h not in _ALIASES_DICT:
             not_found_triples[h].extend(related_triples)
             continue
         for pattern in [_ALIASES_PATTERNS_MAP[als_str] for als_str in _ALIASES_DICT[h]]:
@@ -86,7 +116,11 @@ def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: lis
         tail_spans_cache = {}
         for r, t in related_triples:
             tail_spans = set()
+            if t not in _ALIASES_DICT:
+                not_found_triples[h].append((r, t))
+                continue
             if t not in tail_spans_cache:
+
                 for pattern in [_ALIASES_PATTERNS_MAP[als_str] for als_str in _ALIASES_DICT[t]]:
                     for match in pattern.finditer(description_text):
                         char_start, char_end = match.span()
@@ -108,14 +142,6 @@ def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: lis
 
     return triple_spans, not_found_triples
 
-def _build_chunks_triples_descriptions(triples, descriptions, chunks_n):
-    chunks =[]
-    for t_chunk in chunk_list(triples, chunks_n):
-        t_chunk_ids = {t[0] for t in t_chunk}
-        desc_chunk = {k: descriptions[k] for k in t_chunk_ids if k in descriptions}
-        chunks.append((t_chunk, desc_chunk))
-    triples_chunks, descriptions_chunks = zip(*chunks) if chunks else ([], [])
-    return list(triples_chunks), list(descriptions_chunks)
 
 def main(use_minimized):
     max_descriptions_length = 128
@@ -125,79 +151,92 @@ def main(use_minimized):
     aliases_pattern_map = create_aliases_patterns_map(aliases_dict)
 
     descriptions = data_loader.get_descriptions(minimized=use_minimized)
+
+    shm_desc, shm_desc_size = share_dict(descriptions)
+    shm_aliases, shm_aliases_size = share_dict(aliases_dict)
+
     len_descriptions = len(descriptions)
     triples = data_loader.get_triples_train(minimized=use_minimized)
 
-    print("chunking...")
-    triples_chunks, descriptions_chunks = _build_chunks_triples_descriptions(triples=triples, descriptions=descriptions, chunks_n=chunks_n)
 
 
     print(f"Distributing to {chunks_n} processes")
-    with Pool(
-        processes=chunks_n,  
-        initializer=init_worker_discover_aliases, 
-        initargs=(aliases_pattern_map, aliases_dict)) as pool:
+    try:
+        with Pool(
+            processes=chunks_n,  
+            initializer=init_worker_discover_aliases, 
+            initargs=(aliases_pattern_map, shm_aliases.name, shm_aliases_size, shm_desc.name, shm_desc_size)
+        ) as pool:
+            args = [(idx, t_chunk, max_descriptions_length) for idx, t_chunk in enumerate(chunk_list(triples, chunks_n))]
+            results_chunks = pool.starmap(chunk_description_discover_aliases_spans, args)
+    except Exception as ex:
+        print(f"Error during multiprocessing: {ex}")
+        return False
+    finally:
+        shm_desc.close(); shm_desc.unlink()
+        shm_aliases.close(); shm_aliases.unlink()
 
-        args = [(idx, t_chunk, d_chunk, max_descriptions_length) for idx, (t_chunk,d_chunk) in enumerate(zip(triples_chunks, descriptions_chunks))]
-        results_chunks = pool.starmap(chunk_description_discover_aliases_spans, args)
-        results_all  = defaultdict(list)
-        not_found_triples_all = defaultdict(list)
-        for res_chunk, not_found_triples in results_chunks:
-            for h_id, gold_triple in res_chunk.items():
-                results_all[h_id].extend(gold_triple)
-                not_found_triples_all[h_id].extend(not_found_triples[h_id])
-        
-        print(f"  {len(results_all)}/{len(descriptions)} entities has golden triples")
-
-
-        triples_without_gold = []
-        new_triples = []
-        new_descriptions = {}
-        for h,r,t in triples:
-            if h in results_all and (r, t) not in not_found_triples_all[h]:
-                new_triples.append((h,r,t))
-                new_descriptions[h] = descriptions[h]
-            else:
-                triples_without_gold.append((h,r,t))
+    results_all  = defaultdict(list)
+    not_found_triples_all = defaultdict(list)
+    for res_chunk, not_found_triples in results_chunks:
+        for h_id, gold_triple in res_chunk.items():
+            results_all[h_id].extend(gold_triple)
+        for h_id, not_found in not_found_triples.items():
+            not_found_triples_all[h_id].extend(not_found)
 
 
-        print(f"  {len(triples_without_gold)}/{len(triples)} triples don't have gold triples")
-        print(f"Descriptions number was reduced from {len_descriptions} to {len(new_descriptions)}")
-        print(f"Triples number was reduced from {len(triples)} to {len(new_triples)}")
-        del aliases_dict, aliases_pattern_map, descriptions, triples
-
-        descriptions_embeddings_ids = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
-        description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL, mmap=True)
-        mask = np.array([id_ in set(new_descriptions.keys())
-                 for id_ in descriptions_embeddings_ids])
-        N_new = mask.sum()
-        B, L, H = description_embeddings.shape
-        tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp"
-        description_embeddings_new = init_mmap(tmp_path, (N_new, L, H), "float32")
-        description_embeddings_new[:] = description_embeddings[mask]
-        description_embeddings_new.flush()
-        del description_embeddings, description_embeddings_new
-        os.replace(tmp_path + ".npy", settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".npy")
-
-        description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
-        description_embeddings_masks = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
-
-        description_embeddings_mean_filtered   = description_embeddings_mean[mask]
-        descriptions_embeddings_masks_filtered = description_embeddings_masks[mask]
-        descriptions_embeddings_ids_filtered   = [id_ for id_, m in zip(descriptions_embeddings_ids, mask) if m]
+    print(f"  {len(results_all)}/{len(descriptions)} entities has golden triples")
 
 
+    triples_without_gold = []
+    new_triples = []
+    new_descriptions = {}
+    not_found_set = {h: set(pairs) for h, pairs in not_found_triples_all.items()}
+    for h,r,t in triples:
+        if h in results_all and (r, t) not in not_found_set.get(h, set()):
+            new_triples.append((h,r,t))
+            new_descriptions[h] = descriptions[h]
+        else:
+            triples_without_gold.append((h,r,t))
+
+
+    print(f"  {len(triples_without_gold)}/{len(triples)} triples don't have gold triples")
+    print(f"Descriptions number was reduced from {len_descriptions} to {len(new_descriptions)}")
+    print(f"Triples number was reduced from {len(triples)} to {len(new_triples)}")
+    del aliases_dict, aliases_pattern_map, descriptions, triples
+
+    descriptions_embeddings_ids = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
+    description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL, mmap=True)
+    mask = np.array([id_ in set(new_descriptions.keys())
+                for id_ in descriptions_embeddings_ids])
+    N_new = mask.sum()
+    B, L, H = description_embeddings.shape
+    tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp"
+    description_embeddings_new = init_mmap(tmp_path, (N_new, L, H), "float32")
+    description_embeddings_new[:] = description_embeddings[mask]
+    description_embeddings_new.flush()
+    del description_embeddings, description_embeddings_new
+    os.replace(tmp_path + ".npy", settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".npy")
+
+    description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
+    description_embeddings_masks = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
+
+    description_embeddings_mean_filtered   = description_embeddings_mean[mask]
+    descriptions_embeddings_masks_filtered = description_embeddings_masks[mask]
+    descriptions_embeddings_ids_filtered   = [id_ for id_, m in zip(descriptions_embeddings_ids, mask) if m]
 
 
 
-        save_tensor(description_embeddings_mean_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
-        save_tensor(descriptions_embeddings_masks_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
-        cache_array(descriptions_embeddings_ids_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
 
 
-        cache_array(results_all, settings.MINIMIZED_FILES.GOLD_TRIPLES)
-        cache_array(new_triples, settings.MINIMIZED_FILES.TRIPLES_TRAIN)
-        cache_array(new_descriptions, settings.MINIMIZED_FILES.DESCRIPTIONS)
+    save_tensor(description_embeddings_mean_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
+    save_tensor(descriptions_embeddings_masks_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
+    cache_array(descriptions_embeddings_ids_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
+
+
+    cache_array(results_all, settings.MINIMIZED_FILES.GOLD_TRIPLES)
+    cache_array(new_triples, settings.MINIMIZED_FILES.TRIPLES_TRAIN)
+    cache_array(new_descriptions, settings.MINIMIZED_FILES.DESCRIPTIONS)
 
 
 if __name__=="__main__":
