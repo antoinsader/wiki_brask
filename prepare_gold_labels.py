@@ -150,6 +150,7 @@ def main(use_minimized):
     aliases_dict = data_loader.get_aliases(minimized=use_minimized)
     aliases_pattern_map = create_aliases_patterns_map(aliases_dict)
 
+
     descriptions = data_loader.get_descriptions(minimized=use_minimized)
 
     shm_desc, shm_desc_size = share_dict(descriptions)
@@ -207,17 +208,20 @@ def main(use_minimized):
 
     descriptions_embeddings_ids = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
     description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL, mmap=True)
+    print("Creating mask")
     mask = np.array([id_ in set(new_descriptions.keys())
                 for id_ in descriptions_embeddings_ids])
     N_new = mask.sum()
     B, L, H = description_embeddings.shape
     tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp"
+    print(f"Starting to do filtering on description embeddings, new size will be {B} -->> {N_new} ")
     description_embeddings_new = init_mmap(tmp_path, (N_new, L, H), "float32")
     description_embeddings_new[:] = description_embeddings[mask]
     description_embeddings_new.flush()
     del description_embeddings, description_embeddings_new
     os.replace(tmp_path + ".npy", settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".npy")
 
+    print(f"Reducing description embeddings mean and masks")
     description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
     description_embeddings_masks = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
 
@@ -227,7 +231,7 @@ def main(use_minimized):
 
 
 
-
+    print("Saving..")
 
     save_tensor(description_embeddings_mean_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
     save_tensor(descriptions_embeddings_masks_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
