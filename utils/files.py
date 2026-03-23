@@ -24,15 +24,16 @@ def save_tensor(tensor: torch.Tensor, path: str):
     print(f"Tensor cached in file {npy_path}")
 
 
-def read_tensor(path: str) -> torch.Tensor:
-    # Handle both .npy and legacy .npz paths
-    if not path.endswith(".npy"):
-        path = path + ".npy"
-    print(f"Reading from path {path}")
-    arr = np.load(path, mmap_mode='r')  # mmap — does not load fully into RAM
-    return torch.from_numpy(np.array(arr))
 
-
+def read_tensor(path: str, mmap: bool = False) -> torch.Tensor:
+    npy_path = path if path.endswith(".npy") else path + ".npy"
+    print(f"Reading from {npy_path}")
+    if mmap:
+        arr = np.load(npy_path, mmap_mode='r')
+        return torch.from_numpy(arr)
+    else:
+        arr = np.load(npy_path)
+        return torch.from_numpy(arr.copy())
 
 def scan_text_file_lines(fp, scan_head_ids= False):
     total = 0

@@ -2,6 +2,8 @@
 # (forward_head_start, forward_head_end, backward_tail_start, backward_tail_end) each is a tensor with shape (B, L, 1) having 0,1 values
 # (forward_tail_start, forward_tail_end, backward_head_start, backward_tail_end) each is a tensor with shape (B, R, S, L, 1) where S is maximum number of heads for forward, maximum number of tails for backward
 
+import os
+
 import torch
 import re
 from collections import defaultdict
@@ -11,7 +13,7 @@ from tqdm import tqdm
 
 from operations.tokenizer import tokenize
 
-from utils.files import cache_array, read_cached_array, read_tensor
+from utils.files import cache_array, init_mmap, read_cached_array, read_tensor, save_tensor
 from utils.settings import settings
 from utils.chunking import  chunk_list
 from utils.pre_processed_data import data_loader
@@ -164,24 +166,36 @@ def main(use_minimized):
         print(f"Triples number was reduced from {len(triples)} to {len(new_triples)}")
         del aliases_dict, aliases_pattern_map, descriptions, triples
 
-        description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL)
-        description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
         descriptions_embeddings_ids = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
+        description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL, mmap=True)
+        mask = np.array([id_ in set(new_descriptions.keys())
+                 for id_ in descriptions_embeddings_ids])
+        N_new = mask.sum()
+        B, L, H = description_embeddings.shape
+        tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp"
+        description_embeddings_new = init_mmap(tmp_path, (N_new, L, H), "float32")
+        description_embeddings_new[:] = description_embeddings[mask]
+        description_embeddings_new.flush()
+        del description_embeddings, description_embeddings_new
+        os.replace(tmp_path + ".npy", settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".npy")
 
+        description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
+        description_embeddings_masks = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
 
-
-        
-        mask  = np.array([id_ in list(new_descriptions.keys()) for id_ in descriptions_embeddings_ids])
-        description_embeddings_filtered        = description_embeddings[mask]
         description_embeddings_mean_filtered   = description_embeddings_mean[mask]
+        descriptions_embeddings_masks_filtered = description_embeddings_masks[mask]
         descriptions_embeddings_ids_filtered   = [id_ for id_, m in zip(descriptions_embeddings_ids, mask) if m]
 
 
 
-        print(f"new descriptions embeddings shape: {description_embeddings_filtered.shape}, new description meean embeddings shape: {description_embeddings_mean_filtered.shape}, new description embeddings ids: {len(descriptions_embeddings_ids_filtered)}")
+
+
+        save_tensor(description_embeddings_mean_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
+        save_tensor(descriptions_embeddings_masks_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
+        cache_array(descriptions_embeddings_ids_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
+
 
         cache_array(results_all, settings.MINIMIZED_FILES.GOLD_TRIPLES)
-
         cache_array(new_triples, settings.MINIMIZED_FILES.TRIPLES_TRAIN)
         cache_array(new_descriptions, settings.MINIMIZED_FILES.DESCRIPTIONS)
 
