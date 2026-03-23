@@ -24,6 +24,8 @@ def main():
     out_all_embs = "../data/minimized/description_embeddings_all.npy"
     tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     model = AutoModel.from_pretrained('bert-base-cased')
+    model = model.to(device)
+    model.eval()
     max_length = 128
     H = model.config.hidden_size
 

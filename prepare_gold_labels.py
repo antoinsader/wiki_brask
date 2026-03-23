@@ -213,13 +213,13 @@ def main(use_minimized):
                 for id_ in descriptions_embeddings_ids])
     N_new = mask.sum()
     B, L, H = description_embeddings.shape
-    tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp"
+    tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp.npy"
     print(f"Starting to do filtering on description embeddings, new size will be {B} -->> {N_new} ")
     description_embeddings_new = init_mmap(tmp_path, (N_new, L, H), "float32")
     description_embeddings_new[:] = description_embeddings[mask]
     description_embeddings_new.flush()
     del description_embeddings, description_embeddings_new
-    os.replace(tmp_path + ".npy", settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".npy")
+    os.replace(tmp_path, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL)
 
     print(f"Reducing description embeddings mean and masks")
     description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
