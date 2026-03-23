@@ -129,12 +129,11 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
 
     model  = model.to(device)
     model.eval()
-    batch_size = 128 if use_cuda else 32
     num_workers = 16 if use_cuda else 1
 
     sentences_chunks = chunk_list(sentences, chunks_n=num_workers)
 
-
+    print(f"Distributing embedding work to {num_workers} workers")
     with Pool(
         processes=num_workers,
     ) as pool:
@@ -142,10 +141,12 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
         results = pool.starmap(description_embedding_chunk_worker, worker_args)
         results_mean_embs = [res[0] for res in results]
         all_means_embs = torch.cat(results_mean_embs, dim=0)
+        print(f"mean_embs shape: {all_means_embs.shape} should be (N, H) ({len(sentences)}, 768)")
         save_tensor(all_means_embs, out_mean_embs)
         del results_mean_embs
         results_all_embs = [res[1] for res in results]
         all_all_embs = torch.cat(results_all_embs, dim=0)
+        print(f"all_embs shape: {all_all_embs.shape} should be (N, L, H) ({len(sentences)}, {max_length}, 768)")
         save_tensor(all_all_embs, out_all_embs)
         del results_all_embs
         results_all_masks = [res[2] for res in results]
@@ -153,6 +154,7 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
         save_tensor(all_all_masks, out_all_masks)
         del results_all_masks
         cache_array(desc_ids, out_ids)
+        
         return True
     return False
 

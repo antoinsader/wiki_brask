@@ -253,7 +253,7 @@ def embed_descriptions():
     tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     model = AutoModel.from_pretrained('bert-base-cased')
 
-    mean_embs, all_embs, all_masks = get_descriptions_embedding(
+    success = get_descriptions_embedding(
         tokenizer=tokenizer, 
         model=model, 
         sentences= sentences, 
@@ -267,13 +267,10 @@ def embed_descriptions():
         out_ids=out_ids
         )
 
-    print(f"mean_embs shape: {mean_embs.shape} should be (N, H) ({len(descriptions)}, 768)")
-    print(f"mean_embs shape: {all_embs.shape} should be (N, L, H) ({len(descriptions)}, {descriptions_max_length},  768)")
-    
+    if success:
+        print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_all_masks}, {out_ids}")
 
-    print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_all_masks}, {out_ids}")
-
-    return True
+    return success
 
 def main():
     answer = timed_input("Do you want to perform minimization on dictionaries? [Y/n]")
