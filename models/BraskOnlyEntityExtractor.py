@@ -1,4 +1,8 @@
 #### THIS FILE IS FOR TEST PURPOSES ONLY.
+"""
+In this file, I try to do stand-alone training of the entity extractor part. Only to validate the extractor architecture before using in the full training.
+That's why in the model here, we add a projection layer to the description embeddings because here we are not fine-tuning the BERT encoder (which in the full model we are doing).
+"""
 
 import torch
 import torch.nn as nn
@@ -17,12 +21,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class _MiniBrask(nn.Module):
     def __init__(self, hidden_dim):
         super().__init__()
+        self.projection = nn.Linear(hidden_dim, hidden_dim)
         self.fwd_head_entity_extractor = EntityExtractor(hidden_dim)
         self.bwd_tail_entity_extractor = EntityExtractor(hidden_dim)
 
     def forward(self, description_embeddings):
-        fwd_head_start_logits, fwd_head_end_logits = self.fwd_head_entity_extractor(description_embeddings)
-        bwd_tail_start_logits, bwd_tail_end_logits = self.bwd_tail_entity_extractor(description_embeddings)
+        x = F.gelu(self.projection(description_embeddings))
+        fwd_head_start_logits, fwd_head_end_logits = self.fwd_head_entity_extractor(x)
+        bwd_tail_start_logits, bwd_tail_end_logits = self.bwd_tail_entity_extractor(x)
         return fwd_head_start_logits, fwd_head_end_logits, bwd_tail_start_logits, bwd_tail_end_logits
 
 
@@ -48,34 +54,32 @@ def compute_loss(
     fwd_loss_head = torch.tensor(0.0, device=device)
     bwd_loss_tail = torch.tensor(0.0, device=device)
     n_triples = 0
-    def masked_bce(logits, gold, mask):
+    def masked_bce(logits, gold, mask, pos_weight=20.0):
+        pw = torch.tensor(pos_weight, device=logits.device)
         loss = F.binary_cross_entropy_with_logits(
-            logits, gold, reduction="none"
+            logits, gold, pos_weight=pw, reduction="none"
         )
         return (loss * mask).sum()  / (mask.sum() + 1e-8)
 
     for b, triples in enumerate(gold_triples_per_sentence):
         mask = token_mask[b]
-        
+        gold_h_start = torch.zeros(max_length, device=device)
+        gold_h_end   = torch.zeros(max_length, device=device)
+        gold_t_start = torch.zeros(max_length, device=device)
+        gold_t_end   = torch.zeros(max_length, device=device)
+
         for (head_start, head_end), r, (tail_start, tail_end) in triples:
-            gold_h_start = torch.zeros(max_length, device=device)
-            gold_h_end = torch.zeros(max_length, device=device)
             gold_h_start[head_start] = 1.0
-            gold_h_end[head_end] = 1.0
-
-            gold_t_start = torch.zeros(max_length, device=device)
-            gold_t_end   = torch.zeros(max_length, device=device)
+            gold_h_end[head_end]   = 1.0
             gold_t_start[tail_start] = 1.0
-            gold_t_end[tail_end]     = 1.0
+            gold_t_end[tail_end]   = 1.0
 
-            fwd_loss_head = fwd_loss_head +  masked_bce(fwd_head_start_logits[b], gold_h_start, mask) +  masked_bce(fwd_head_end_logits[b], gold_h_end, mask)
-            bwd_loss_tail = bwd_loss_tail + masked_bce(bwd_tail_start_logits[b], gold_t_start, mask) +  masked_bce(bwd_tail_end_logits[b], gold_t_end, mask)
 
-            n_triples += 1
 
-            #! here usually I include for the object which I will not do here
+        fwd_loss_head += masked_bce(fwd_head_start_logits[b], gold_h_start, mask) +  masked_bce(fwd_head_end_logits[b], gold_h_end, mask)
+        bwd_loss_tail += masked_bce(bwd_tail_start_logits[b], gold_t_start, mask) +  masked_bce(bwd_tail_end_logits[b], gold_t_end, mask)
 
-    return (fwd_loss_head + bwd_loss_tail) / max(n_triples, 1)
+    return (fwd_loss_head + bwd_loss_tail) / max(B, 1)
 
 
 class _EntityExtractorDst(Dataset):
@@ -128,7 +132,7 @@ def _eval_metrics(tp: int, fp: int, fn: int) -> dict:
     f1        = 2 * precision * recall / (precision + recall + 1e-8)
     return {"precision": precision, "recall": recall, "f1": f1}
 
-def evaluate(model, val_dataloader, device, max_length, threshold=0.5):
+def evaluate(model, val_dataloader, device, threshold=0.5):
     model.eval()
     fwd_tp = fwd_fp = fwd_fn = 0
     bwd_tp = bwd_fp = bwd_fn = 0
@@ -220,20 +224,26 @@ def test_train_alone():
         avg_loss = epoch_loss / max(batch_count, 1)
 
         # Evaluate:
-        metrics = evaluate(model, val_loader, device, max_length=description_embs_all.shape[1], threshold=0.5)
-        head_f1 = metrics["forward"]["f1"]
-        tail_f1 = metrics["backward"]["f1"]
-        avg_f1 = (head_f1 + tail_f1) / 2
-        print(
-            f"Epoch {epoch+1}/{num_epochs} "
-            f"| loss: {avg_loss:.4f} "
-            f"| forward P={metrics['forward']['precision']:.4f} "
-            f"R={metrics['forward']['recall']:.4f} "
-            f"F1={head_f1:.4f}, fwd_tp={metrics['fwd_tp']} "
-            f"| backward P={metrics['backward']['precision']:.4f} "
-            f"R={metrics['backward']['recall']:.4f} "
-            f"F1={tail_f1:.4f}, bwd_tp={metrics['bwd_tp']}"
-        )
+        #evaluate on multiple thresholds:
+        all_avg_f1 = []
+        for threshold in [0.2,0.3, 0.5, ]:
+            metrics = evaluate(model, val_loader, device, threshold=threshold)
+            head_f1 = metrics["forward"]["f1"]
+            tail_f1 = metrics["backward"]["f1"]
+            avg_f1 = (head_f1 + tail_f1) / 2
+            print(
+                f"Epoch {epoch+1}/{num_epochs}  | threshold: {threshold:.2f} "
+                f"| loss: {avg_loss:.4f} "
+                f"| forward P={metrics['forward']['precision']:.4f} "
+                f"R={metrics['forward']['recall']:.4f} "
+                f"F1={head_f1:.4f}, fwd_tp={metrics['fwd_tp']} "
+                f"| backward P={metrics['backward']['precision']:.4f} "
+                f"R={metrics['backward']['recall']:.4f} "
+                f"F1={tail_f1:.4f}, bwd_tp={metrics['bwd_tp']}"
+            )
+            all_avg_f1.append(avg_f1)
+
+        avg_f1 = max(all_avg_f1)
         if avg_f1 > best_f1:
             best_f1    = avg_f1
             best_epoch = epoch + 1

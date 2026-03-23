@@ -403,7 +403,7 @@ def entity_extractor_loss(pred_logits, gold, token_mask, pos_weight=10.0):
 
 def loss_compute():
     # When you compute object predictions over padded subject slots, those slots should be masked out in the loss. Keep track of forward_sk_mask and backward_sk_mask and pass them to the loss function.
-    
+    # Important to have pos_weight
     pass
 
 def main(use_minimized: bool):
