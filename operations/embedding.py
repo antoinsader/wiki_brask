@@ -84,11 +84,14 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
 
     model  = model.to(device)
     model.eval()
-    batch_size = 512 if use_cuda else 128
+    batch_size = 128 if use_cuda else 32
 
-    all_means = []
-    all_embs = []
-    all_masks = []
+    N = len(sentences)
+    H = model.config.hidden_size
+
+    final_mean_embs = torch.zeros(N, H, dtype=torch.float32)
+    final_all_embs = torch.zeros(N, max_length, H, dtype=torch.float32)
+    final_all_masks = torch.zeros(N, max_length, dtype=torch.int64)
     for start in tqdm(range(0, len(sentences), batch_size) , desc="Embedding senteneces"):
         end = min(start + batch_size, len(sentences))
         chunk = sentences[start: end]
@@ -110,13 +113,13 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
         token_counts = attention_mask_exp.sum(dim=1).clamp(min=1) #(B, 1)
         mean_embs = sum_embs / token_counts #(B, H)
 
-        all_means.append(mean_embs.cpu())
-        all_embs.append(embs.cpu())
-        all_masks.append(attention_mask.cpu()) # B,L
+        final_mean_embs[start:end] = mean_embs.cpu()
+        final_all_embs[start:end] = embs.cpu()
+        final_all_masks[start:end] = attention_mask.cpu() # B,L
         if device.type == "cuda":
             torch.cuda.empty_cache()
-    final_mean_embs = torch.cat(all_means, dim = 0)
-    final_all_embs = torch.cat(all_embs, dim = 0)
-    final_all_masks = torch.cat(all_masks, dim = 0)
+
+
+
     return final_mean_embs, final_all_embs,final_all_masks 
 
