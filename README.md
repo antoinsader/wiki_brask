@@ -11,8 +11,16 @@ This implementation uses PyTorch with DDP support for distributed training and f
 ## Build the model
 
 ### Create environment
+1- Clone the repository:
+```bash
 
-1- Create your python env and activate it, download requirements
+git clone https://github.com/antoinsader/wiki_brask.git
+cd wiki_brask
+
+```
+
+
+2- Create your python env and activate it, download requirements
 
 ```bash
 python -m venv .venv
