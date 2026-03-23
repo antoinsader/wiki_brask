@@ -18,21 +18,18 @@ def read_cached_array(filename):
 
 def save_tensor(tensor: torch.Tensor, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Use .npy extension — np.save does not compress, writes directly to disk
-    npy_path = path if path.endswith(".npy") else path + ".npy"
-    np.save(npy_path, tensor.cpu().numpy())
-    print(f"Tensor cached in file {npy_path}")
+    np.save(path, tensor.cpu().numpy())
+    print(f"Tensor cached in file {path}")
 
 
 
 def read_tensor(path: str, mmap: bool = False) -> torch.Tensor:
-    npy_path = path if path.endswith(".npy") else path + ".npy"
-    print(f"Reading from {npy_path}")
+    print(f"Reading from {path}")
     if mmap:
-        arr = np.load(npy_path, mmap_mode='r')
+        arr = np.load(path, mmap_mode='r')
         return torch.from_numpy(arr)
     else:
-        arr = np.load(npy_path)
+        arr = np.load(path)
         return torch.from_numpy(arr.copy())
 
 def scan_text_file_lines(fp, scan_head_ids= False):
@@ -48,9 +45,8 @@ def scan_text_file_lines(fp, scan_head_ids= False):
 
 def init_mmap(path: str, shape: tuple, dtype: str) -> np.memmap:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    npy_path = path if path.endswith(".npy") else path + ".npy"
     return np.lib.format.open_memmap(
-        npy_path,
+        path,
         mode='w+',
         dtype=dtype,
         shape=shape

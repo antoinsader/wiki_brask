@@ -16,19 +16,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def main():
-    descriptions = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTIONS)
+    descriptions = read_cached_array("../data/minimized/descriptions.pkl")
     sentences = list(descriptions.values())
     N = len(descriptions)
     del descriptions
     batch_size= 128
-    out_all_embs = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL
+    out_all_embs = "../data/minimized/description_embeddings_all.npy"
     tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     model = AutoModel.from_pretrained('bert-base-cased')
     max_length = 128
     H = model.config.hidden_size
 
     final_all_embs = init_mmap(out_all_embs, (N, max_length, H), "float32")
-    
+
     for start in tqdm(range(0, len(sentences), batch_size) , desc="Embedding senteneces"):
         end = min(start + batch_size, len(sentences))
         chunk = sentences[start: end]
