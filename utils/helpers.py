@@ -1,10 +1,9 @@
 from tqdm import tqdm
 import sys
-import time
 import re
 
+import os
 
-import math
 
 
 def get_strange_chars():
@@ -18,7 +17,7 @@ def get_strange_chars():
             r"[ḟ]": "f",
             r"[ǵğǧģĝġḡ]": "g",
             r"[ḫȟḩĥḧḣḥẖ]": "h",
-            r"[íĭǐîïḯi̇ịȉìỉȋīįĩḭı]": "i",
+            r"[íĭǐîïḯi̇ịȉìỉȋīįĩḭ]": "i",
             r"[ǰĵ]": "j",
             r"[ḱǩķḳḵ]": "k",
             r"[ĺľļḽḷḹḻ]": "l",
@@ -57,42 +56,41 @@ def ask_factor(prompt):
         except ValueError:
             print("Invalid input- choose a decimal number between 0 and 1")
 
-def timed_input(prompt, timeout=15, default="y"):
-    """Prompt the user with a countdown. Returns default if no answer within timeout."""
-    import msvcrt
-   
-    print(prompt)
-    chars = []
-    end_time = time.time() + timeout
 
-    while True:
-        remaining = end_time - time.time()
-        if remaining <= 0:
-            sys.stdout.write(f"\r  → No input detected, proceeding with '{default}'...        \n")
-            sys.stdout.flush()
+def timed_input(prompt: str, timeout: int = 10, default: str = "y") -> str:
+    """Cross-platform timed input.
+    Returns user input if provided within timeout, otherwise returns default.
+    """
+    print(f"{prompt} (auto-answer '{default}' in {timeout}s): ", end="", flush=True)
+
+    if os.name == "nt":
+        # Windows
+        import msvcrt
+        import time
+        start = time.time()
+        chars = []
+        while True:
+            if msvcrt.kbhit():
+                c = msvcrt.getwche()
+                if c in ("\r", "\n"):
+                    print()
+                    return "".join(chars).strip() or default
+                chars.append(c)
+            if time.time() - start > timeout:
+                print()
+                return default
+
+    else:
+        pp = 1
+        # Linux / macOS
+        import select
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if ready:
+            answer = sys.stdin.readline().strip()
+            return answer if answer else default
+        else:
+            print()  # newline after the prompt
             return default
-
-        secs = math.ceil(remaining)
-        line = f"  [auto-'{default}' in {secs}s] > {''.join(chars)}"
-        sys.stdout.write(f"\r{line}  ")
-        sys.stdout.flush()
-
-        if msvcrt.kbhit():
-            ch = msvcrt.getwch()
-            if ch in ('\r', '\n'):
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                user_input = ''.join(chars).strip().lower()
-                return user_input if user_input else default
-            elif ch == '\x08':  # backspace
-                if chars:
-                    chars.pop()
-            elif ch == '\x03':  # Ctrl-C
-                raise KeyboardInterrupt
-            else:
-                chars.append(ch)
-
-        time.sleep(0.05)
 
 
 def create_aliases_patterns_map(aliases : dict) -> dict[str, re.Pattern]:
