@@ -88,7 +88,7 @@ class _MinimizedFiles:
     SILVER_SPANS: str = "silver_spans.pkl"
     GOLD_TRIPLES: str = "golden_triples.pkl"
 
-    DESCRIPTION_EMBEDDINGS_ALL: str = "description_embeddings_all.npz"
+    DESCRIPTION_EMBEDDINGS_ALL: str = "description_embeddings_all.npy"
     DESCRIPTION_EMBEDDINGS_MEAN: str = "description_embeddings_mean.npz"
     DESCRIPTION_EMBEDDING_ALL_MASKS : str = "description_embeddings_all_masks.npz"
     DESCRIPTION_EMBEDDINGS_IDS : str = "description_embeddings_ids.pkl"

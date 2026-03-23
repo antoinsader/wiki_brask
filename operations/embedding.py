@@ -2,6 +2,7 @@ import torch
 from tqdm import tqdm
 
 
+from utils.files import save_tensor, init_mmap
 
 def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cuda, device):
     """Compute one averaged BERT embedding per relation.
@@ -79,8 +80,8 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
     return sums / counts.clamp(min=1).unsqueeze(1)
 
 
-def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, max_length: int=128) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Embed each sentence using BERT, returns (mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
+def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, out_all_embs: str, out_mean_embs: str, out_all_masks: str, max_length: int=128) -> bool:
+    """Embed each sentence using BERT, and save into tensor files(mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
 
     model  = model.to(device)
     model.eval()
@@ -89,8 +90,9 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
     N = len(sentences)
     H = model.config.hidden_size
 
+    mm_all_embs = init_mmap(out_all_embs, shape=(N, max_length, H), dtype="float32")
+
     final_mean_embs = torch.zeros(N, H, dtype=torch.float32)
-    final_all_embs = torch.zeros(N, max_length, H, dtype=torch.float32)
     final_all_masks = torch.zeros(N, max_length, dtype=torch.int64)
     for start in tqdm(range(0, len(sentences), batch_size) , desc="Embedding senteneces"):
         end = min(start + batch_size, len(sentences))
@@ -108,18 +110,22 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
             embs = out.last_hidden_state #(B, L, H)
-        attention_mask_exp = attention_mask.unsqueeze(-1) #(B, L, 1)
+        attention_mask_exp = attention_mask.unsqueeze(-1).float() #(B, L, 1)
         sum_embs = (embs * attention_mask_exp).sum(dim=1) #(B, H)
         token_counts = attention_mask_exp.sum(dim=1).clamp(min=1) #(B, 1)
         mean_embs = sum_embs / token_counts #(B, H)
 
         final_mean_embs[start:end] = mean_embs.cpu()
-        final_all_embs[start:end] = embs.cpu()
+        mm_all_embs[start:end] = embs.cpu().numpy()
         final_all_masks[start:end] = attention_mask.cpu() # B,L
         if device.type == "cuda":
             torch.cuda.empty_cache()
+    mm_all_embs.flush() # ensure all data is written to disk
+    del mm_all_embs # close memmap
 
+    save_tensor(final_mean_embs, out_mean_embs)
+    del final_mean_embs
+    save_tensor(final_all_masks, out_all_masks)
 
-
-    return final_mean_embs, final_all_embs,final_all_masks 
+    return True
 
