@@ -90,6 +90,7 @@ class _MinimizedFiles:
 
     DESCRIPTION_EMBEDDINGS_ALL: str = "description_embeddings_all.npz"
     DESCRIPTION_EMBEDDINGS_MEAN: str = "description_embeddings_mean.npz"
+    DESCRIPTION_EMBEDDING_ALL_MASKS : str = "description_embeddings_all_masks.npz"
     DESCRIPTION_EMBEDDINGS_IDS : str = "description_embeddings_ids.pkl"
 
     def __post_init__(self):
@@ -102,6 +103,7 @@ class _MinimizedFiles:
                      "SILVER_SPANS",
                      "DESCRIPTION_EMBEDDINGS_ALL",
                      "DESCRIPTION_EMBEDDINGS_MEAN",
+                        "DESCRIPTION_EMBEDDING_ALL_MASKS",
                      "DESCRIPTION_EMBEDDINGS_IDS",
                      "GOLD_TRIPLES"]:
             filename = getattr(self, attr)

@@ -246,13 +246,14 @@ def embed_descriptions():
 
     out_mean_embs = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN
     out_all_embs = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL
+    out_all_masks = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS
     out_ids = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS
     sentences = list(descriptions.values())
 
     tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     model = AutoModel.from_pretrained('bert-base-cased')
 
-    mean_embs, all_embs = get_descriptions_embedding(
+    mean_embs, all_embs, all_masks = get_descriptions_embedding(
         tokenizer=tokenizer, 
         model=model, 
         sentences= sentences, 
@@ -265,9 +266,11 @@ def embed_descriptions():
     
     save_tensor(mean_embs, out_mean_embs)
     save_tensor(all_embs, out_all_embs)
+    save_tensor(all_masks, out_all_masks)
+    
     cache_array(list(descriptions.keys()), out_ids)
 
-    print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_ids}")
+    print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_all_masks}, {out_ids}")
 
     return True
 

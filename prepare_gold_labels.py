@@ -167,6 +167,10 @@ def main(use_minimized):
         description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL)
         description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
         descriptions_embeddings_ids = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
+
+
+
+        
         mask  = np.array([id_ in list(new_descriptions.keys()) for id_ in descriptions_embeddings_ids])
         description_embeddings_filtered        = description_embeddings[mask]
         description_embeddings_mean_filtered   = description_embeddings_mean[mask]

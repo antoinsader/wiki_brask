@@ -2,9 +2,10 @@ from collections import defaultdict
 import os
 import re
 import nltk
+import torch
 from tqdm import tqdm
 
-from utils.files import cache_array, read_cached_array
+from utils.files import cache_array, read_cached_array, read_tensor
 from utils.settings import _MinimizedFiles, _PreprocessedFiles, settings
 
 
@@ -80,6 +81,12 @@ class RawDataLoader:
             raise FileNotFoundError(f"Minimized cache not found: {pkl_fp}. Run minimize.py first.")
         return read_cached_array(pkl_fp)
 
+    def _get_minimized_tensor(self, tensor_fp):
+        if not os.path.isfile(tensor_fp):
+            raise FileNotFoundError(f"Minimized cache not found: {tensor_fp}. Run minimize.py first.")
+        return read_tensor(tensor_fp)
+
+
     def get_triples_train(self, minimized=False) -> dict:
         if minimized:
             return self._get_minimized(self.min.TRIPLES_TRAIN)
@@ -96,6 +103,7 @@ class RawDataLoader:
             return self._get_minimized(self.min.DESCRIPTIONS)
         return self._get(self.pkl.DESCRIPTIONS, self.raw.DESCRIPTIONS, self._parse_descriptions)
 
+
     def get_aliases(self, minimized=False) -> dict:
         if minimized:
             return self._get_minimized(self.min.ALIASES)
@@ -111,6 +119,14 @@ class RawDataLoader:
             return self._get_minimized(self.min.SILVER_SPANS)
         return self._get(self.pkl.SILVER_SPANS, None, None)
 
+    def get_golden_triples(self) -> torch.Tensor:
+        return self._get_minimized(self.min.GOLD_TRIPLES)
+
+    def get_description_embeddings_all(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        description_embs_all = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDINGS_ALL)
+        description_embs_ids = self._get_minimized(self.min.DESCRIPTION_EMBEDDINGS_IDS)
+        description_embs_masks = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDING_ALL_MASKS)
+        return description_embs_all, description_embs_ids, description_embs_masks
 
     def cache_all(self):
         """Parse and cache every dataset. Skips files already cached."""

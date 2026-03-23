@@ -79,15 +79,16 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
     return sums / counts.clamp(min=1).unsqueeze(1)
 
 
-def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, max_length: int=128) -> tuple[torch.Tensor, torch.Tensor]:
-    """Embed each sentence using BERT, returns (mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D] )"""
+def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, max_length: int=128) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Embed each sentence using BERT, returns (mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
 
     model  = model.to(device)
     model.eval()
-    batch_size = 128 if use_cuda else 16
+    batch_size = 512 if use_cuda else 128
 
     all_means = []
     all_embs = []
+    all_masks = []
     for start in tqdm(range(0, len(sentences), batch_size) , desc="Embedding senteneces"):
         end = min(start + batch_size, len(sentences))
         chunk = sentences[start: end]
@@ -100,19 +101,22 @@ def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, u
         )
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
+
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
             embs = out.last_hidden_state #(B, L, H)
-        attention_mask = attention_mask.unsqueeze(-1) #(B, L, 1)
-        sum_embs = (embs * attention_mask).sum(dim=1) #(B, H)
-        token_counts = attention_mask.sum(dim=1).clamp(min=1) #(B, 1)
+        attention_mask_exp = attention_mask.unsqueeze(-1) #(B, L, 1)
+        sum_embs = (embs * attention_mask_exp).sum(dim=1) #(B, H)
+        token_counts = attention_mask_exp.sum(dim=1).clamp(min=1) #(B, 1)
         mean_embs = sum_embs / token_counts #(B, H)
 
         all_means.append(mean_embs.cpu())
         all_embs.append(embs.cpu())
+        all_masks.append(attention_mask.cpu()) # B,L
         if device.type == "cuda":
             torch.cuda.empty_cache()
     final_mean_embs = torch.cat(all_means, dim = 0)
     final_all_embs = torch.cat(all_embs, dim = 0)
-    return final_mean_embs, final_all_embs
+    final_all_masks = torch.cat(all_masks, dim = 0)
+    return final_mean_embs, final_all_embs,final_all_masks 
 

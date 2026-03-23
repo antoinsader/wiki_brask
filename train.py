@@ -317,25 +317,25 @@ class BraskModel(torch.nn.Module):
         forward_c, forward_a = self.semantic_relation_attention(description_embeddings, semantic_relation_embeddings, description_mean_embeddings)
         backward_c, backward_a = self.trane_relation_attention(description_embeddings, transe_relation_embeddings, description_mean_embeddings)
 
-
+        # ?! During training: You use gold subject spans to build sk directly — no thresholding, no extract_sk. As discussed earlier this is teacher forcing.
         # Extract sk
         # ?! During training, should I train with my silver spans to extract_sk ? the gradients won't flow back through forward_head_start/end to the encoder. The paper trains subject extraction and object extraction jointly with a shared loss (Eq. 19).
-        forward_sk, forward_sk_mask = extract_sk(
-            description_embeddings=description_embeddings,
-            start_probs=forward_head_start_probs,
-            end_probs=forward_head_end_probs,
-            start_threshold=self.threshold_head_start,
-            end_threshold=self.threshold_head_end,
-            max_span_length=self.max_span_len
-            )
-        backward_sk, backward_sk_mask = extract_sk(
-            description_embeddings=description_embeddings,
-            start_probs=backward_tail_start_probs,
-            end_probs=backward_tail_end_probs,
-            start_threshold=self.threshold_tail_start,
-            end_threshold=self.threshold_tail_end,
-            max_span_length=self.max_span_len
-        )
+        # forward_sk, forward_sk_mask = extract_sk(
+        #     description_embeddings=description_embeddings,
+        #     start_probs=forward_head_start_probs,
+        #     end_probs=forward_head_end_probs,
+        #     start_threshold=self.threshold_head_start,
+        #     end_threshold=self.threshold_head_end,
+        #     max_span_length=self.max_span_len
+        #     )
+        # backward_sk, backward_sk_mask = extract_sk(
+        #     description_embeddings=description_embeddings,
+        #     start_probs=backward_tail_start_probs,
+        #     end_probs=backward_tail_end_probs,
+        #     start_threshold=self.threshold_tail_start,
+        #     end_threshold=self.threshold_tail_end,
+        #     max_span_length=self.max_span_len
+        # )
 
 
 
