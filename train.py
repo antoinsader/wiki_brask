@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
 
-from train_transe import NUM_WORKERS
+from train_transe import NUM_EPOCHS, NUM_WORKERS
 from utils.files import read_cached_array, read_tensor
 from utils.settings import settings
 from utils.pre_processed_data import check_preprocessed_files, data_loader, check_minimized_files
@@ -46,22 +46,41 @@ class BraskDataset(Dataset):
     def __init__(self, 
                  description_embeddings: torch.Tensor,
                  description_mean_embeddings: torch.Tensor,
-                 description_embeddings_ids: list[str],):
+                 description_embs_masks: torch.Tensor,
+                 description_embeddings_ids: list[str],
+                 golden_triples: dict,
+                 ):
 
         self.N = description_embeddings.shape[0]
         self.description_embeddings = description_embeddings
         self.description_mean_embeddings = description_mean_embeddings
+        self.description_embs_masks = description_embs_masks
         self.description_embeddings_ids = description_embeddings_ids
+        self.golden_triples = golden_triples
 
-    def __getitem__(self, idx):
-        return (
-            self.description_embeddings[idx],
-            self.description_mean_embeddings[idx],
-            self.description_embeddings_ids[idx],
-        )
+
+    def __getitem__(self, index):
+        description_embedding = self.description_embeddings[index]
+        description_id = self.desecription_embeddings_ids[index]
+        description_emb_mask = self.description_embs_masks[index]
+        description_emb_mean = self.description_mean_embeddings[index]
+        golden_triples = self.golden_triples[description_id]
+
+        return description_id, description_embedding, description_emb_mask, description_emb_mean, golden_triples
 
     def __len__(self):
         return self.N
+
+
+def collate_fn(batch):
+    description_id = [ item[0] for item in batch]
+    description_embeddings = torch.stack([item[1] for item in batch], dim=0)
+    masks = torch.stack([item[2] for item in batch], dim=0)
+    description_emb_mean = torch.stack([item[3] for item in batch], dim=0)
+    golden_triples = [item[4] for item in batch]
+    return description_id, description_embeddings, masks, description_emb_mean, golden_triples
+
+    
 
 class RelationAttention(nn.Module):
     """In paper 3.3.2. Semantic relation guidance: returning fine-grained sentence representatio
@@ -392,45 +411,62 @@ def main(use_minimized: bool):
     if not check_training_files(use_minimized):
         return
 
-
+    NUM_EPOCHS = 10
     BATCH_SIZE = 64 if use_cuda else 16
     NUM_WORKERS = 4 if use_cuda else 0
+    LEARNING_RATE =   1e-4
+    val_split = 0.1
 
 
     print("Loading data")
-    files_paths = settings.MINIMIZED_FILES if use_minimized else settings.PREPROCESSED_FILES
-    silver_spans_fp = files_paths.SILVER_SPANS
-    description_embeddings_all_fp = files_paths.DESCRIPTION_EMBEDDINGS_ALL
-    description_embeddings_mean_fp = files_paths.DESCRIPTION_EMBEDDINGS_MEAN
+    golden_triples = data_loader.get_golden_triples()
+    description_embs_all, description_embs_ids, description_embs_masks = data_loader.get_description_embeddings_all()
+    description_embs_mean = data_loader.get_description_embeddings_mean()
 
-    silver_spans = read_cached_array(silver_spans_fp)
-    description_embeddings_all = read_tensor(description_embeddings_all_fp)
-    description_embeddings_mean = read_tensor(description_embeddings_mean_fp)
-    description_embeddings_ids = read_cached_array(files_paths.DESCRIPTION_EMBEDDINGS_IDS)
-
-
-    dataset = BraskDataset(
-        description_embeddings=description_embeddings_all,
-        description_mean_embeddings=description_embeddings_mean,
-        description_embeddings_ids=description_embeddings_ids
+    full_dataset = BraskDataset(
+        description_embeddings=description_embs_all,
+        description_mean_embeddings=        description_embs_mean,
+        description_embs_masks=description_embs_masks,
+        description_embeddings_ids=description_embs_ids,
+        golden_triples=golden_triples
     )
-    sampler = DistributedSampler(dataset)
+    N = len(description_embs_all)
+    L = description_embs_all.shape[1]
+    val_size = int(N * val_split)
+    train_size = N - val_size
+
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, 
+        [train_size, val_size], 
+        generator=torch.Generator().manual_seed(42))
+
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, collate_fn=collate_fn)
+
+
+
+    train_loader = DataLoader(train_dataset, 
+
+
+    sampler = DistributedSampler(train_dataset)
     print("creating data loader")
-    dataloader = DataLoader(
-        dataset,
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=BATCH_SIZE,
         sampler = sampler,
         num_workers=NUM_WORKERS,
         pin_memory=use_cuda,
+        shuffle=True,
     )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        shuffle=False,
+        pin_memory=use_cuda
+    )
+    
 
-
-
-    silver_spans_head_start = silver_spans["head_start"]
-    silver_spans_head_end = silver_spans["head_end"]
-    silver_spans_tail_start = silver_spans["tail_start"]
-    silver_spans_tail_end = silver_spans["tail_end"]
-    silver_spans_desc_ids = silver_spans["desc_ids"]
 
     for ds_batch in dataloader:
         print(ds_batch)

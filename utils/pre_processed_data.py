@@ -128,6 +128,9 @@ class RawDataLoader:
         description_embs_masks = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDING_ALL_MASKS)
         return description_embs_all, description_embs_ids, description_embs_masks
 
+    def get_description_embeddings_mean(self) -> torch.Tensor:
+        return self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDINGS_MEAN)
+
     def cache_all(self):
         """Parse and cache every dataset. Skips files already cached."""
         self.get_triples_train()

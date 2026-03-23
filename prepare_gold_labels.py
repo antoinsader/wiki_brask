@@ -69,6 +69,9 @@ def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: lis
 
         # Compute head spans once per head entity
         head_spans_found = set()
+        if h not in _ALIASES_DICT or t not in _ALIASES_DICT:
+            not_found_triples[h].extend(related_triples)
+            continue
         for pattern in [_ALIASES_PATTERNS_MAP[als_str] for als_str in _ALIASES_DICT[h]]:
             for match in pattern.finditer(description_text):
                 char_start, char_end = match.span()
