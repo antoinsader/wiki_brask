@@ -108,7 +108,14 @@ def chunk_description_discover_aliases_spans(process_idx: int,triples_chunk: lis
 
     return triple_spans, not_found_triples
 
-
+def _build_chunks_triples_descriptions(triples, descriptions, chunks_n):
+    chunks =[]
+    for t_chunk in chunk_list(triples, chunks_n):
+        t_chunk_ids = {t[0] for t in t_chunk}
+        desc_chunk = {k: descriptions[k] for k in t_chunk_ids if k in descriptions}
+        chunks.append((t_chunk, desc_chunk))
+    triples_chunks, descriptions_chunks = zip(*chunks) if chunks else ([], [])
+    return list(triples_chunks), list(descriptions_chunks)
 
 def main(use_minimized):
     max_descriptions_length = 128
@@ -122,17 +129,7 @@ def main(use_minimized):
     triples = data_loader.get_triples_train(minimized=use_minimized)
 
     print("chunking...")
-    _triples_chunks = chunk_list(triples, chunks_n=chunks_n)
-    descriptions_chunks = []
-    triples_chunks = []
-
-    for t_chunk in _triples_chunks:
-        t_chunk_ids = [t[0] for t in t_chunk]
-        desc_chunk = {k:v for k, v in descriptions.items() if k in t_chunk_ids}
-        descriptions_chunks.append(desc_chunk)
-        triples_chunks.append(t_chunk)
-
-    del  _triples_chunks
+    triples_chunks, descriptions_chunks = _build_chunks_triples_descriptions(triples=triples, descriptions=descriptions, chunks_n=chunks_n)
 
 
     print(f"Distributing to {chunks_n} processes")
