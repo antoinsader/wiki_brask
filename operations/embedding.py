@@ -1,10 +1,5 @@
-from multiprocessing import Pool
-
 import torch
 from tqdm import tqdm
-
-from utils.chunking import chunk_list
-from utils.files import cache_array, save_tensor
 
 
 
@@ -84,21 +79,24 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
     return sums / counts.clamp(min=1).unsqueeze(1)
 
 
-def description_embedding_chunk_worker(process_idx: int, sentences_chunk: list[str], tokenizer, model, device, use_cuda, max_length: int):
+def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, max_length: int=128) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Embed each sentence using BERT, returns (mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
 
-    N = len(sentences_chunk)
+    model  = model.to(device)
+    model.eval()
+    batch_size = 128 if use_cuda else 32
+
+    N = len(sentences)
     H = model.config.hidden_size
-    chunk_batch_size = 256 if use_cuda else 32
 
-    mean_embs = torch.zeros(N, H, dtype=torch.float32)
-    all_embs = torch.zeros(N, max_length, H, dtype=torch.float32)
-    all_masks = torch.zeros(N, max_length, dtype=torch.int64)
-
-    for start in tqdm(range(0, N, chunk_batch_size), desc=f"[Process-{process_idx}] Embedding sentences"):
-        end = min(start + chunk_batch_size, N)
-        chunk_batch = sentences_chunk[start:end]
+    final_mean_embs = torch.zeros(N, H, dtype=torch.float32)
+    final_all_embs = torch.zeros(N, max_length, H, dtype=torch.float32)
+    final_all_masks = torch.zeros(N, max_length, dtype=torch.int64)
+    for start in tqdm(range(0, len(sentences), batch_size) , desc="Embedding senteneces"):
+        end = min(start + batch_size, len(sentences))
+        chunk = sentences[start: end]
         enc = tokenizer(
-            chunk_batch,
+            chunk,
             padding="max_length",
             truncation=True,
             max_length=max_length,
@@ -106,55 +104,22 @@ def description_embedding_chunk_worker(process_idx: int, sentences_chunk: list[s
         )
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
+
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
-            embs = out.last_hidden_state  # (B, L, H)
-        attention_mask_exp = attention_mask.unsqueeze(-1)  # (B, L, 1)
-        sum_embs = (embs * attention_mask_exp).sum(dim=1)  # (B, H)
-        token_counts = attention_mask_exp.sum(dim=1).clamp(min=1)  # (B, 1)
-        mean_embs_batch = sum_embs / token_counts  # (B, H)
+            embs = out.last_hidden_state #(B, L, H)
+        attention_mask_exp = attention_mask.unsqueeze(-1) #(B, L, 1)
+        sum_embs = (embs * attention_mask_exp).sum(dim=1) #(B, H)
+        token_counts = attention_mask_exp.sum(dim=1).clamp(min=1) #(B, 1)
+        mean_embs = sum_embs / token_counts #(B, H)
 
-        mean_embs[start:end] = mean_embs_batch.cpu()
-        all_embs[start:end] = embs.cpu()
-        all_masks[start:end] = attention_mask.cpu()  # (B, L)
+        final_mean_embs[start:end] = mean_embs.cpu()
+        final_all_embs[start:end] = embs.cpu()
+        final_all_masks[start:end] = attention_mask.cpu() # B,L
         if device.type == "cuda":
             torch.cuda.empty_cache()
-    return mean_embs, all_embs, all_masks
 
 
 
-
-def get_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, desc_ids: list[str], out_mean_embs: str, out_all_embs: str, out_all_masks: str, out_ids: str,  max_length: int=128) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Embed each sentence using BERT, returns (mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
-
-    model  = model.to(device)
-    model.eval()
-    num_workers = 16 if use_cuda else 1
-
-    sentences_chunks = chunk_list(sentences, chunks_n=num_workers)
-
-    print(f"Distributing embedding work to {num_workers} workers")
-    with Pool(
-        processes=num_workers,
-    ) as pool:
-        worker_args = [(i, chunk, tokenizer, model, device, use_cuda, max_length) for i, chunk in enumerate(sentences_chunks)]
-        results = pool.starmap(description_embedding_chunk_worker, worker_args)
-        results_mean_embs = [res[0] for res in results]
-        all_means_embs = torch.cat(results_mean_embs, dim=0)
-        print(f"mean_embs shape: {all_means_embs.shape} should be (N, H) ({len(sentences)}, 768)")
-        save_tensor(all_means_embs, out_mean_embs)
-        del results_mean_embs
-        results_all_embs = [res[1] for res in results]
-        all_all_embs = torch.cat(results_all_embs, dim=0)
-        print(f"all_embs shape: {all_all_embs.shape} should be (N, L, H) ({len(sentences)}, {max_length}, 768)")
-        save_tensor(all_all_embs, out_all_embs)
-        del results_all_embs
-        results_all_masks = [res[2] for res in results]
-        all_all_masks = torch.cat(results_all_masks, dim=0)
-        save_tensor(all_all_masks, out_all_masks)
-        del results_all_masks
-        cache_array(desc_ids, out_ids)
-        
-        return True
-    return False
+    return final_mean_embs, final_all_embs,final_all_masks 
 
