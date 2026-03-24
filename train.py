@@ -1,19 +1,30 @@
+"""
+Plan:
+- BraskModel: EntityExtractor(head/ tail), RelationAttention (semantic/transe), FuseExtractor
+- Training stages:
+    1. Train EntityExtractor (fwd_head/ bwd_tail) only. BCE vs gold triples.
+    2. Full model, teacher forcing ratio = 1.0 (gold sk passed in).
+    3. Full model, teacher forcing ratio decay from 1.0 to 0.0 over epochs.
 
-import torch
+"""
+
+
+
 import os
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
-
-
-from train_transe import NUM_EPOCHS, NUM_WORKERS
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from collections import defaultdict
+from tqdm import tqdm
+ 
 from utils.files import read_cached_array, read_tensor
 from utils.settings import settings
-from utils.pre_processed_data import check_preprocessed_files, data_loader, check_minimized_files
-from models.EntityExtractor import EntityExtractor
+from utils.pre_processed_data import data_loader
+ 
 
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 use_cuda = torch.cuda.is_available()
-device = torch.device("cuda" if use_cuda else "cpu")
+
 
 
 
