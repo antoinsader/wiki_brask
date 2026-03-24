@@ -103,5 +103,3 @@ def build_gold_entity_labels(triples_batch, mask, max_length) -> tuple[torch.Ten
             if te < L:
                 bwd_tail_end[b, te] = 1.0
     return fwd_head_start, fwd_head_end, bwd_tail_start, bwd_tail_end
-
-

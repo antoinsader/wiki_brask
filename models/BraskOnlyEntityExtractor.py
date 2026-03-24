@@ -142,7 +142,7 @@ def _eval_metrics(tp: int, fp: int, fn: int) -> dict:
     f1        = 2 * precision * recall / (precision + recall + 1e-8)
     return {"precision": precision, "recall": recall, "f1": f1}
 
-def evaluate(model, val_dataloader, device, threshold=0.5):
+def evaluate(model, val_dataloader, device, thresholds):
     model.eval()
     all_fwd_start: list[torch.Tensor] = []
     all_fwd_end:   list[torch.Tensor] = []
@@ -152,7 +152,7 @@ def evaluate(model, val_dataloader, device, threshold=0.5):
     all_gold_tails: list[set] = []
     
     with torch.no_grad():
-        for batch in tqdm(val_dataloader, total=len(val_dataloader), desc="Eval – forward pass"):
+        for batch in tqdm(val_dataloader, total=len(val_dataloader), desc="Evaluation forward pass"):
             X, mask, golden_triples = batch
             X = X.to(device)
 
