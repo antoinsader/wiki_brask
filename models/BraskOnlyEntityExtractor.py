@@ -137,7 +137,7 @@ def evaluate(model, val_dataloader, device, threshold=0.5):
     fwd_tp = fwd_fp = fwd_fn = 0
     bwd_tp = bwd_fp = bwd_fn = 0
     with torch.no_grad():
-        for batch in val_dataloader:
+        for batch in tqdm(val_dataloader, total=len(val_dataloader), desc=f"Evaluating with threshold={threshold:.2f}"):
             X, mask, golden_triples = batch
             X = X.to(device)
             mask = mask.to(device)
