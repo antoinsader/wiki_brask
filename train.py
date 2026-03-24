@@ -81,3 +81,27 @@ def collate_fn(batch):
     }
 
 
+def build_gold_entity_labels(triples_batch, mask, max_length) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build binary labels for head and tail entity spans from golden triples. Used for computing BCE loss"""
+
+
+    B, L = mask.shape
+    fwd_head_start = torch.zeros((B, L), dtype=torch.float32, device=device)
+    fwd_head_end = torch.zeros((B, L), dtype=torch.float32, device=device)
+    bwd_tail_start = torch.zeros((B, L), dtype=torch.float32, device=device)
+    bwd_tail_end = torch.zeros((B, L), dtype=torch.float32, device=device)
+
+
+    for b, triples in enumerate(triples_batch):
+        for (hs, he), _, (ts, te) in triples:
+            if hs < L:
+                fwd_head_start[b, hs] = 1.0
+            if he < L:
+                fwd_head_end[b, he] = 1.0
+            if ts < L:
+                bwd_tail_start[b, ts] = 1.0
+            if te < L:
+                bwd_tail_end[b, te] = 1.0
+    return fwd_head_start, fwd_head_end, bwd_tail_start, bwd_tail_end
+
+

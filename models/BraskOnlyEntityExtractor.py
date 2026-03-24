@@ -4,6 +4,8 @@ In this file, I try to do stand-alone training of the entity extractor part. Onl
 That's why in the model here, we add a projection layer to the description embeddings because here we are not fine-tuning the BERT encoder (which in the full model we are doing).
 """
 
+from xml.parsers.expat import model
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -106,24 +108,32 @@ def collate_fn(batch):
     golden_triples = [item[2] for item in batch]
     return description_embeddings, masks, golden_triples
 
+def _extract_spans_batch(
+    start_probs: torch.Tensor,  # (B, L)
+    end_probs: torch.Tensor,    # (B, L)
+    threshold: float = 0.5,
+) -> list[set]:
+    """Vectorized span extraction for a full batch. Returns list of span-sets."""
+    B, L = start_probs.shape
+    start_mask = start_probs >= threshold  # (B, L) bool
+    end_mask   = end_probs   >= threshold  # (B, L) bool
 
-def _extract_spans(start_probs: torch.Tensor, end_probs: torch.Tensor, threshold:float=0.5):
-    start_positions = (start_probs >= threshold).nonzero(as_tuple=False).squeeze(-1)
-    end_positions = (end_probs >= threshold).nonzero(as_tuple=False).squeeze(-1)
-    
-    if start_positions.dim() == 0 or end_positions.dim() == 0:
-        return set()
+    all_spans = []
+    for b in range(B):
+        s_positions = start_mask[b].nonzero(as_tuple=False).view(-1).tolist()
+        e_positions = end_mask[b].nonzero(as_tuple=False).view(-1).tolist()
+        spans = set()
+        consumed_ends: set[int] = set()
+        e_array = sorted(e_positions)  # already sorted, but be safe
+        for s in s_positions:
+            for e in e_array:
+                if e >= s and e not in consumed_ends:
+                    spans.add((s, e))
+                    consumed_ends.add(e)
+                    break
+        all_spans.append(spans)
+    return all_spans
 
-    spans = set()
-    consumed_ends = set()
-    for s in start_positions:
-        s = s.item()
-        valid_ends = [e.item() for e in end_positions if e.item() >= s and e.item() not in consumed_ends]
-        if valid_ends:
-            e = min(valid_ends)
-            spans.add((s, e))
-            consumed_ends.add(e)
-    return spans
 
 
 def _eval_metrics(tp: int, fp: int, fn: int) -> dict:
@@ -134,40 +144,66 @@ def _eval_metrics(tp: int, fp: int, fn: int) -> dict:
 
 def evaluate(model, val_dataloader, device, threshold=0.5):
     model.eval()
-    fwd_tp = fwd_fp = fwd_fn = 0
-    bwd_tp = bwd_fp = bwd_fn = 0
+    all_fwd_start: list[torch.Tensor] = []
+    all_fwd_end:   list[torch.Tensor] = []
+    all_bwd_start: list[torch.Tensor] = []
+    all_bwd_end:   list[torch.Tensor] = []
+    all_gold_heads: list[set] = []
+    all_gold_tails: list[set] = []
+    
     with torch.no_grad():
-        for batch in tqdm(val_dataloader, total=len(val_dataloader), desc=f"Evaluating with threshold={threshold:.2f}"):
+        for batch in tqdm(val_dataloader, total=len(val_dataloader), desc="Eval – forward pass"):
             X, mask, golden_triples = batch
             X = X.to(device)
-            mask = mask.to(device)
-            fwd_start_logits, fwd_end_logits, bwd_start_logits, bwd_end_logits = model(X)
-            fwd_start_probs = torch.sigmoid(fwd_start_logits).squeeze(-1) # (B, L)
-            fwd_end_probs = torch.sigmoid(fwd_end_logits).squeeze(-1) # (B, L)
-            bwd_start_probs = torch.sigmoid(bwd_start_logits).squeeze(-1) # (B, L)
-            bwd_end_probs = torch.sigmoid(bwd_end_logits).squeeze(-1) # (B, L)
-            for b, b_golden_triples in enumerate(golden_triples):
-                gold_head_spans = set()
-                gold_tail_spans = set()
-                for (hs, he), _, (ts, te) in b_golden_triples:
-                    gold_head_spans.add((hs, he))
-                    gold_tail_spans.add((ts, te))
-                fwd_pred_spans = _extract_spans(fwd_start_probs[b], fwd_end_probs[b], threshold)
-                bwd_pred_spans = _extract_spans(bwd_start_probs[b], bwd_end_probs[b], threshold)
-                # True positives
-                fwd_tp += len(fwd_pred_spans & gold_head_spans)
-                bwd_tp += len(bwd_pred_spans & gold_tail_spans)
-                # False positives
-                fwd_fp += len(fwd_pred_spans - gold_head_spans)
-                bwd_fp += len(bwd_pred_spans - gold_tail_spans)
-                # False negatives
-                fwd_fn += len(gold_head_spans - fwd_pred_spans)
-                bwd_fn += len(gold_tail_spans - bwd_pred_spans)
 
-    fwd_metrics = _eval_metrics(fwd_tp, fwd_fp, fwd_fn)
-    bwd_metrics = _eval_metrics(bwd_tp, bwd_fp, bwd_fn)
-    return {"forward": fwd_metrics, "backward": bwd_metrics, "fwd_tp": fwd_tp, "bwd_tp": bwd_tp} 
+            fwd_sl, fwd_el, bwd_sl, bwd_el = model(X)
+            # Move to CPU immediately to free GPU memory
+            all_fwd_start.append(torch.sigmoid(fwd_sl).squeeze(-1).cpu())
+            all_fwd_end.append(  torch.sigmoid(fwd_el).squeeze(-1).cpu())
+            all_bwd_start.append(torch.sigmoid(bwd_sl).squeeze(-1).cpu())
+            all_bwd_end.append(  torch.sigmoid(bwd_el).squeeze(-1).cpu())
 
+            for b_triples in golden_triples:
+                head_spans, tail_spans = set(), set()
+                for (hs, he), _, (ts, te) in b_triples:
+                    head_spans.add((hs, he))
+                    tail_spans.add((ts, te))
+                all_gold_heads.append(head_spans)
+                all_gold_tails.append(tail_spans)
+
+    # Concatenate into single tensors: (N, L)
+    fwd_start_all = torch.cat(all_fwd_start, dim=0)
+    fwd_end_all   = torch.cat(all_fwd_end,   dim=0)
+    bwd_start_all = torch.cat(all_bwd_start, dim=0)
+    bwd_end_all   = torch.cat(all_bwd_end,   dim=0)
+
+    # ── 2. Sweep thresholds — no model calls ───────────────────────────────
+    results: dict[float, dict] = {}
+    for threshold in thresholds:
+        fwd_tp = fwd_fp = fwd_fn = 0
+        bwd_tp = bwd_fp = bwd_fn = 0
+
+        fwd_pred_all = _extract_spans_batch(fwd_start_all, fwd_end_all, threshold)
+        bwd_pred_all = _extract_spans_batch(bwd_start_all, bwd_end_all, threshold)
+
+        for fwd_pred, bwd_pred, gold_h, gold_t in zip(
+            fwd_pred_all, bwd_pred_all, all_gold_heads, all_gold_tails
+        ):
+            fwd_tp += len(fwd_pred & gold_h)
+            fwd_fp += len(fwd_pred - gold_h)
+            fwd_fn += len(gold_h  - fwd_pred)
+            bwd_tp += len(bwd_pred & gold_t)
+            bwd_fp += len(bwd_pred - gold_t)
+            bwd_fn += len(gold_t  - bwd_pred)
+
+        results[threshold] = {
+            "forward":  _eval_metrics(fwd_tp, fwd_fp, fwd_fn),
+            "backward": _eval_metrics(bwd_tp, bwd_fp, bwd_fn),
+            "fwd_tp": fwd_tp,
+            "bwd_tp": bwd_tp,
+        }
+
+    return results
 def test_train_alone():
     num_epochs  = 10
     val_split = 0.1
@@ -226,11 +262,12 @@ def test_train_alone():
         # Evaluate:
         #evaluate on multiple thresholds:
         all_avg_f1 = []
-        for threshold in [0.2,0.3, 0.5, ]:
-            metrics = evaluate(model, val_loader, device, threshold=threshold)
+        all_avg_f1 = []
+        metrics_by_threshold = evaluate(model, val_loader, device, thresholds=[0.2, 0.3, 0.5])
+        for threshold, metrics in metrics_by_threshold.items():
             head_f1 = metrics["forward"]["f1"]
             tail_f1 = metrics["backward"]["f1"]
-            avg_f1 = (head_f1 + tail_f1) / 2
+            avg_f1  = (head_f1 + tail_f1) / 2
             print(
                 f"Epoch {epoch+1}/{num_epochs}  | threshold: {threshold:.2f} "
                 f"| loss: {avg_loss:.4f} "
