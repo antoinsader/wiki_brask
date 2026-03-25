@@ -144,7 +144,7 @@ def chunk_description_discover_aliases_spans(
 
 
 def main(use_minimized):
-    max_descriptions_length = 128
+    max_descriptions_length = 256
     chunks_n = 16 if use_cuda else 4
     print("loadiung dictionaries...")
     aliases_dict = data_loader.get_aliases(minimized=use_minimized)

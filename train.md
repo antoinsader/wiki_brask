@@ -5,7 +5,7 @@
 
 Whenever we refer:
 - B: batch_size
-- L: description_max_length (128)
+- L: description_max_length (256)
 - H: encoder hidden dim (768 for BERT)
 - T: dim for relation after training on TransE
 - R: number of relations
@@ -54,3 +54,8 @@ We do the training through 3 stages:
 - Build gold tail labels: `gold_fts, gold_fte, gold_bhs, gold_bhe` extracted from golden_triples. Each of these tensor is in shape (B, R, S, L). `gold_fts` is the binary labels for golden `forward tail start`, an item inside these golden tensors can have `0 or 1` value, 1 meaning that for the sentence `b`  for the relation `r` for the subject `s`, the token `l` is a `head start` token.
 
 - 
+
+
+
+Loss is near zero but F1 is near zero → model predicts all zeros → increase pos_weight to 20–50
+Loss oscillates and model predicts too many positives → decrease pos_weight to 5

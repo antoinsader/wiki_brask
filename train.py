@@ -29,7 +29,7 @@ from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict
 from tqdm import tqdm
 
-from models import EntityExtractor
+from models.EntityExtractor import EntityExtractor
 from utils.files import read_cached_array, read_tensor
 from utils.settings import settings
 from utils.pre_processed_data import data_loader
@@ -48,6 +48,11 @@ CHECKPOINTS_DIR = "checkpoints/"
 LEARNING_RATE_STAGE_1 = 1e-4
 LEARNING_RATE_STAGE_2 = 1e-5
 
+# Tune these if model predicts all zeros (increase) or all ones (decrease)
+POS_WEIGHT_ENTITY = 10.0   # for head/tail entity extractors (stage 1)
+POS_WEIGHT_OBJ    = 10.0   # for fused object/subject predictors (stage 2 and 3)
+
+
 
 MODEL_OUTPUT_KEYS = {
     "FORWARD_HEAD_START": "fwd_head_start",
@@ -58,6 +63,9 @@ MODEL_OUTPUT_KEYS = {
     "BACKWARD_TAIL_END": "bwd_tail_end",
     "BACKWARD_HEAD_START": "bwd_head_start",
     "BACKWARD_HEAD_END": "bwd_head_end",
+    "SK": "sk",
+    "SK_MASK": "sk_mask",
+    "unique_subjects_batch": "unique_subjects_batch",
 }
 
 
@@ -136,88 +144,126 @@ def build_gold_entity_labels(triples_batch, mask) -> tuple[torch.Tensor, torch.T
 
     return fwd_head_start, fwd_head_end, bwd_tail_start, bwd_tail_end
 
-def get_max_subjects(triples_batch, rel2idx):
-    max_s = 1
-    for triples in triples_batch:
-        span_slot = defaultdict(int)
-        for (hs, he), r, _ in triples:
-            r_idx = rel2idx[r]
-            key= (hs, he, r_idx)
-            span_slot[key] += 1
-            max_s = max(max_s, span_slot[key])
-    return max_s
-
-
-def build_gold_tail_labels(triples_batch, mask, max_subjects, num_relations, rel2idx):
+def build_gold_tail_labels(triples_batch, unique_subjects_batch, mask, num_relations, rel2idx):
     """Returns (B,R,S, L) for forward tail and backward head."""
 
 
     B, L = mask.shape
-    R, S = num_relations, max_subjects
-
-
+    R= num_relations
+    unique_subjects = [s if s else [(0, 0)] for s in unique_subjects_batch]
+    S = max(len(s) for s in unique_subjects)
     gold_fwd_tail_start = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
     gold_fwd_tail_end = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
     gold_bwd_head_start = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
     gold_bwd_head_end = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
 
     for b, triples in enumerate(triples_batch):
-        span_slot = defaultdict(int)
+        span_to_slot = {span: idx for idx, span in enumerate(unique_subjects[b])}
         for (hs, he), r, (ts, te) in triples:
             r_idx = rel2idx[r]
-            key = (hs, he, r_idx)
-            slot = span_slot[key]
-
-            if slot >= S:
+            s_idx = span_to_slot.get((hs, he))
+            if s_idx is None or s_idx >= S:
                 continue
             if ts < L:
-                gold_fwd_tail_start[b, r_idx, slot, ts] = 1.0
+                gold_fwd_tail_start[b, r_idx, s_idx, ts] = 1.0
             if te < L:
-                gold_fwd_tail_end[b, r_idx, slot, te] = 1.0
+                gold_fwd_tail_end[b,   r_idx, s_idx, te] = 1.0
             if hs < L:
-                gold_bwd_head_start[b, r_idx, slot, hs] = 1.0
+                gold_bwd_head_start[b, r_idx, s_idx, hs] = 1.0
             if he < L:
-                gold_bwd_head_end[b, r_idx, slot, he] = 1.0
-            span_slot[key] += 1
+                gold_bwd_head_end[b,   r_idx, s_idx, he] = 1.0
+
+
     return gold_fwd_tail_start, gold_fwd_tail_end, gold_bwd_head_start, gold_bwd_head_end
 
 
 
-def build_sk_from_gold(triples_batch, mask, num_relations, max_subjects, rel2idx):
-    """Build subject vector (sk) tensor from gold head spans for teacher forcing during training."""
-    B, L = mask.shape
-    R, S = num_relations, max_subjects
-
-    sk = torch.zeros(B, R, S, 2, dtype=torch.long, device=device)
-    sk_mask = torch.zeros(B, R, S, dtype=torch.float32, device=device)
-
-
-
-    for b, triples in enumerate(triples_batch):
-        slot = defaultdict(int)
-        for (hs, he) , r, _ in triples:
-            r_idx = rel2idx[r]
-            s = slot[(hs, he, r_idx)]
-            if s >= S:
-                continue
-            sk[b, r_idx, s, 0] = hs
-            sk[b, r_idx, s, 1] = he
-            sk_mask[b, r_idx, s] = 1.0
-            slot[(hs, he, r_idx)] += 1
-    return sk, sk_mask
+def build_sk_from_gold(triples_batch, X: torch.Tensor, mask :torch.Tensor):
+    """Returns sk (B, S, H) and sk_mask (B, S).S = max unique subjects across batch."""
+    B, L, H = X.shape
+    unique_subjects = []
+    for b, t in enumerate(triples_batch):
+        seen = {}
+        ordered = []
+        for (hs, he), r, _ in t:
+            if (hs, he) not in seen:
+                if hs >= L or he >= L or mask[b, hs] == 0.0 or mask[b, he] == 0.0:
+                    continue
+                seen[(hs, he)] = len(ordered)
+                ordered.append((hs, he))
+        unique_subjects.append(ordered)
 
 
+    unique_subjects = [s if s else [(0, 0)] for s in unique_subjects]
+    S = max(len(s) for s in unique_subjects)
+    sk = torch.zeros(B, S, H, dtype=torch.float32, device=X.device)
+    sk_mask = torch.zeros(B, S, dtype=torch.float32, device=X.device)
+    for b, subjects in enumerate(unique_subjects):
+        for s_idx, (hs, he) in enumerate(subjects):
+            sk[b, s_idx] = (X[b, hs] + X[b, he]) / 2.0
+            sk_mask[b, s_idx] = 1.0
+    return sk, sk_mask, unique_subjects
+
+def build_sk_prediction(X,mask, fwd_head_start_logits, fwd_head_end_logits, threshold:float=0.5, max_span_length:int=10):
+    """
+        X: (B, L, H)
+        mask: (B, L)
+        fwd_head_start_logits: (B, L)
+        fwd_head_end_logits: (B, L)
+
+    """
+    
+
+
+    B, L, H = X.shape
+    unique_subjects = []
+    for b in range(B):
+        start_probs = torch.sigmoid(fwd_head_start_logits[b])
+        end_probs   = torch.sigmoid(fwd_head_end_logits[b])
+        start_positions = (start_probs >= threshold).nonzero(as_tuple=False).squeeze(-1)
+        end_positions   = (end_probs   >= threshold).nonzero(as_tuple=False).squeeze(-1)
+        spans = []
+        consumed = set()
+        for s_t in start_positions:
+            s = s_t.item()
+            valid_ends = [
+                e.item() for e in end_positions
+                if e.item() >= s
+                and e.item() < s + max_span_length
+                and e.item() not in consumed
+                and mask[b, e.item()] == 1.0   # ignore padding
+            ]
+            if valid_ends:
+                e = min(valid_ends)
+                spans.append((s, e))
+                consumed.add(e)
+        unique_subjects.append(spans)
+    unique_subjects = [s if s else [(0, 0)] for s in unique_subjects]
+    S = max((len(subjects) for subjects in unique_subjects), default=1)    
+    sk      = torch.zeros(B, S, H, dtype=torch.float32, device=X.device)
+    sk_mask = torch.zeros(B, S,    dtype=torch.float32, device=X.device)
+    for b, subjects in enumerate(unique_subjects):
+        for s_idx, (hs, he) in enumerate(subjects):
+            # clamp to valid range — safety guard
+            hs = min(hs, L - 1)
+            he = min(he, L - 1)
+            sk[b, s_idx]      = (X[b, hs] + X[b, he]) / 2.0
+            sk_mask[b, s_idx] = 1.0
+
+    return sk, sk_mask, unique_subjects
 # =============== LOSS ================
 
-def masked_bce(pred_logits, gold, mask):
+def masked_bce(pred_logits, gold, mask, pos_weight):
     """Binary cross entropy loss with masking"""
-    loss = F.binary_cross_entropy_with_logits(pred_logits, gold, reduction="none")
+    pw = torch.tensor([pos_weight], device=pred_logits.device)
+    loss = F.binary_cross_entropy_with_logits(pred_logits, gold, pos_weight=pw, reduction="none")
     loss = loss * mask
     return loss.sum() / (mask.sum() + 1e-8)
 
-def masked_bce_4d(pred_logits, gold, mask):
+def masked_bce_4d(pred_logits, gold, mask, pos_weight):
     """Binary cross entropy loss with masking for 4D tensors (for relation attention loss)"""
-    loss = F.binary_cross_entropy_with_logits(pred_logits, gold, reduction="none")
+    pw = torch.tensor([pos_weight], device=pred_logits.device)
+    loss = F.binary_cross_entropy_with_logits(pred_logits, gold, pos_weight=pw, reduction="none")
     loss = loss * mask
     return loss.sum() / (mask.sum() + 1e-8)
 
@@ -232,70 +278,86 @@ def stage1_loss(
     golden_tail_start_labels,
     golden_tail_end_labels,
 
-    token_mask):
+    token_mask,
+    pos_weight:float=POS_WEIGHT_ENTITY):
     """Loss for stage 1 training (entity extractor only). From paper L_sub + L_obj"""
-    L_fwd = masked_bce(fwd_head_start_logits, golden_head_start_labels, token_mask) + masked_bce(fwd_head_end_logits, golden_head_end_labels, token_mask)
-    L_bwd = masked_bce(bwd_tail_start_logits, golden_tail_start_labels, token_mask) + masked_bce(bwd_tail_end_logits, golden_tail_end_labels, token_mask)
+    L_fwd = masked_bce(fwd_head_start_logits, golden_head_start_labels, token_mask, pos_weight) + masked_bce(fwd_head_end_logits, golden_head_end_labels, token_mask, pos_weight)
+    L_bwd = masked_bce(bwd_tail_start_logits, golden_tail_start_labels, token_mask, pos_weight) + masked_bce(bwd_tail_end_logits, golden_tail_end_labels, token_mask, pos_weight)
     return L_fwd + L_bwd
 
 
-def brask_loss(outputs,gold_labels,token_mask):
+def brask_loss(
+    outputs,
+    gold_labels,
+    token_mask,
+    pos_weight_entity: float = POS_WEIGHT_ENTITY,
+    pos_weight_obj:    float = POS_WEIGHT_OBJ,
+):
     """Loss for the whole model."""
 
 
     _fwd_head_start_loss = masked_bce(
         outputs[MODEL_OUTPUT_KEYS["FORWARD_HEAD_START"]],
         gold_labels["fwd_head_start"],
-        token_mask
+        token_mask,
+        pos_weight_entity
     )
 
     _fwd_head_end_loss = masked_bce(
         outputs[MODEL_OUTPUT_KEYS["FORWARD_HEAD_END"]],
         gold_labels["fwd_head_end"],
-        token_mask
+        token_mask,
+        pos_weight_entity
     )
 
     _bwd_tail_start_loss = masked_bce(
         outputs[MODEL_OUTPUT_KEYS["BACKWARD_TAIL_START"]],
         gold_labels["bwd_tail_start"],
-        token_mask
+        token_mask,
+        pos_weight_entity
     )
 
     _bwd_tail_end_loss = masked_bce(
         outputs[MODEL_OUTPUT_KEYS["BACKWARD_TAIL_END"]],
         gold_labels["bwd_tail_end"],
-        token_mask
+        token_mask,
+        pos_weight_entity
     )
 
     L_f_subject = _fwd_head_start_loss + _fwd_head_end_loss
     L_b_subject = _bwd_tail_start_loss + _bwd_tail_end_loss
 
+    sk_mask_exp  = outputs[MODEL_OUTPUT_KEYS["SK_MASK"]].unsqueeze(1).unsqueeze(-1)  # (B, 1, S, 1)
+    tok_mask_exp = token_mask.unsqueeze(1).unsqueeze(2)      # (B, 1, 1, L)
+    mask_4d      = sk_mask_exp * tok_mask_exp                                          # (B, 1, S, L)
 
-    mask_exp = token_mask.unsqueeze(1).unsqueeze(1)  # (B, 1, 1, L)
-
-
+    
 
     _fwd_tail_start_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["FORWARD_TAIL_START"]],
         gold_labels["fwd_tail_start"],
-        mask_exp
+        mask_4d,
+        pos_weight_obj
     )
 
     _fwd_tail_end_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["FORWARD_TAIL_END"]],
         gold_labels["fwd_tail_end"],
-        mask_exp
+        mask_4d,
+        pos_weight_obj
     )
 
     _bwd_head_start_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["BACKWARD_HEAD_START"]],
         gold_labels["bwd_head_start"],
-        mask_exp
+        mask_4d,
+        pos_weight_obj
     )
     _bwd_head_end_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["BACKWARD_HEAD_END"]],
         gold_labels["bwd_head_end"],
-        mask_exp
+        mask_4d,
+        pos_weight_obj
     )
     L_f_obj = _fwd_tail_start_loss + _fwd_tail_end_loss
     L_b_obj = _bwd_head_start_loss + _bwd_head_end_loss
@@ -327,7 +389,7 @@ class RelationAttention(nn.Module):
         self.V  = nn.Linear(attention_dim, 1)
 
 
-    def forward(self, X, relation_embedding, tokens_mean_embedding):
+    def forward(self, X, relation_embedding, tokens_mean_embedding, mask):
         """
         args:
             X: (B, L, H) token embeddings
@@ -349,6 +411,8 @@ class RelationAttention(nn.Module):
         z = torch.tanh(x_exp + r_exp + g_exp) #(B, R, L, attention_dim)
         e = self.V(z).squeeze(-1) #(B, R, L)
 
+
+        e = e.masked_fill(~mask.unsqueeze(1).bool(), float('-inf'))
         a = torch.softmax(e, dim=-1) #(B, R, L)
         a_exp = a.unsqueeze(-1) #(B, R, L, 1)
 
@@ -415,44 +479,10 @@ class FuseExtractor(nn.Module):
 
         return h_ijk
 
-def sk_to_embeddings(sk, sk_mask, X):
-    B, R, S, _ = sk.shape
-    H = X.shape[2]
-    sk_embs  = torch.zeros(B, R, S, H, device=X.device)
-    for b in range(B):
-        for r in range(R):
-            for s in range(S):
-                if sk_mask[b, r, s] == 0.0:
-                    continue
-
-                start = sk[b,r,s,0]
-                end = sk[b,r,s,1]
-                sk_embs[b, r, s] = (X[b, start] + X[b, end]) / 2.0
-    return sk_embs # (B, R, S, H)
-
-
 
 class BraskModel(torch.nn.Module):
     def __init__(self, hidden_dim, transe_rel_dim):
         super(BraskModel, self).__init__()
-
-
-        # ! in the algorithm , I have to do fusion (token emb, relation emb, entity emb (subject, object)):
-        # ! the way that the paper do is fusion is attention fusion (score =f(x_i, r, global_context)), we might want in the future do other fusion like gating which would be g = sigmoid(W[x_i, r]); h_i = g * x_i + (1-g) * r
-
-
-        # ! I have to do relation smart pruning:
-        # !   1- pre computed consine similarity between entity description and relation embedding
-        # !   2- Not necessarily BERT cosine similarity, might be sentence-transformers
-        # !   3- Consider for each description top-k relations + positive relation from ground truth
-
-
-        # ! After prediction, I might do filtering of the result spans and keep only spans that matches an alias
-        # ! I should not do this during training, my objective is to improve precision.
-
-        # ? Can I prevent EntityExtractor to put positive value for [PAD] during training?
-
-
 
         self.fwd_head_predictor = EntityExtractor(hidden_dim)
         self.bwd_tail_predictor = EntityExtractor(hidden_dim)
@@ -474,31 +504,34 @@ class BraskModel(torch.nn.Module):
 
     def forward(
         self,
-        X,
-        X_mean,
-        mask,
-        sk,
-        sk_mask,
+        X, X_mean, mask, golden_triples,
+        teacher_forcing_ratio,
         semantic_rel_emb,
         transe_rel_emb
     ):
 
+
+
         # B: batch size, L: sequence length, H: hidden dimension
-        description_embs = X #(B, L, H)
-        description_embs_mask = mask #(B, L)
-        description_mean_embs = X_mean #(B, H)
 
 
-        fwd_head_start_logits, fwd_head_end_logits = self.fwd_head_predictor(description_embs) # (B, L, 1) , (B, L, 1)
-        bwd_tail_start_logits, bwd_tail_end_logits = self.bwd_tail_predictor(description_embs) # (B, L, 1) , (B, L, 1)
+        fwd_head_start_logits, fwd_head_end_logits = self.fwd_head_predictor(X) # (B, L, 1) , (B, L, 1)
+        bwd_tail_start_logits, bwd_tail_end_logits = self.bwd_tail_predictor(X) # (B, L, 1) , (B, L, 1)
 
-        forward_c, forward_a = self.fwd_relation_attention(description_embs, semantic_rel_emb, description_mean_embs) # (B, R, H) , (B, R, L)
-        backward_c, backward_a = self.bwd_relation_attention(description_embs, transe_rel_emb, description_mean_embs) # (B, R, H) , (B, R, L)
+        forward_c, _ = self.fwd_relation_attention(X, semantic_rel_emb, X_mean, mask) # (B, R, H) , (B, R, L)
+        backward_c, _ = self.bwd_relation_attention(X, transe_rel_emb, X_mean, mask) # (B, R, H) , (B, R, L)
 
-        sk_embs = sk_to_embeddings(sk, sk_mask, description_embs) # (B, R, S, H)
 
-        forward_hijk = self.fwd_fuse_extractor(description_embs, forward_c, sk_embs, sk_mask) # (B, R, max_num_subjects, L, H)
-        backward_hijk = self.bwd_fuse_extractor(description_embs, backward_c, sk_embs, sk_mask) # (B, R, max_num_subjects, L, H)
+        use_gold = (torch.rand(1).item() < teacher_forcing_ratio)
+        if use_gold:
+            sk_embs, sk_mask, unique_subjects_batch = build_sk_from_gold(golden_triples, X, mask) #((B, S, H), (B,S))
+        else:
+            sk_embs, sk_mask, unique_subjects_batch = build_sk_prediction(X, mask, fwd_head_start_logits.squeeze(-1), fwd_head_end_logits.squeeze(-1) , self.inference_threshold)
+
+
+
+        forward_hijk = self.fwd_fuse_extractor(X, forward_c, sk_embs, sk_mask) # (B, R, max_num_subjects, L, H)
+        backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_embs, sk_mask) # (B, R, max_num_subjects, L, H)
 
 
         B, R, S, L, H = forward_hijk.shape
@@ -506,22 +539,18 @@ class BraskModel(torch.nn.Module):
         backward_head_start_logits, backward_head_end_logits = self.bwd_head_predictor(backward_hijk) # (B, R, S, L, 1)
 
         return {
-                MODEL_OUTPUT_KEYS["FORWARD_HEAD_START"]: fwd_head_start_logits,
-                MODEL_OUTPUT_KEYS["FORWARD_HEAD_END"]: fwd_head_end_logits,
-                MODEL_OUTPUT_KEYS["BACKWARD_TAIL_START"]: bwd_tail_start_logits,
-                MODEL_OUTPUT_KEYS["BACKWARD_TAIL_END"]: bwd_tail_end_logits,
-                MODEL_OUTPUT_KEYS["FORWARD_TAIL_START"]: forward_tails_start_logits,
-                MODEL_OUTPUT_KEYS["FORWARD_TAIL_END"]: forward_tail_end_logits,
-                MODEL_OUTPUT_KEYS["BACKWARD_HEAD_START"]: backward_head_start_logits,
-                MODEL_OUTPUT_KEYS["BACKWARD_HEAD_END"]: backward_head_end_logits,
+                MODEL_OUTPUT_KEYS["FORWARD_HEAD_START"]: fwd_head_start_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["FORWARD_HEAD_END"]: fwd_head_end_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["BACKWARD_TAIL_START"]: bwd_tail_start_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["BACKWARD_TAIL_END"]: bwd_tail_end_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["FORWARD_TAIL_START"]: forward_tails_start_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["FORWARD_TAIL_END"]: forward_tail_end_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["BACKWARD_HEAD_START"]: backward_head_start_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["BACKWARD_HEAD_END"]: backward_head_end_logits.squeeze(-1),
+                MODEL_OUTPUT_KEYS["SK"]: sk_embs,
+                MODEL_OUTPUT_KEYS["SK_MASK"]: sk_mask,
+                MODEL_OUTPUT_KEYS["unique_subjects_batch"]: unique_subjects_batch,
         }
-
-    def extract_sk(self,
-                   X,
-                   mask,
-                   num_relations,
-                   max_subjects):
-        pass
 
 
 def set_stage(model:BraskModel, stage:int):
@@ -557,7 +586,6 @@ def run_epoch_stage1(
     model : BraskModel,
     dataloader,
     optimizer,
-    max_length
 ):
 
 
@@ -577,10 +605,10 @@ def run_epoch_stage1(
         bwd_tail_start, bwd_tail_end = model.bwd_tail_predictor(X) # (B, L, 1) , (B, L, 1)
 
         loss = stage1_loss(
-            fwd_head_start_logits=fwd_head_start,
-            fwd_head_end_logits=fwd_head_end,
-            bwd_tail_start_logits=bwd_tail_start,
-            bwd_tail_end_logits=bwd_tail_end,
+            fwd_head_start_logits=fwd_head_start.squeeze(-1),
+            fwd_head_end_logits=fwd_head_end.squeeze(-1),
+            bwd_tail_start_logits=bwd_tail_start.squeeze(-1),
+            bwd_tail_end_logits=bwd_tail_end.squeeze(-1),
             golden_head_start_labels=gold_fhs,
             golden_head_end_labels=gold_fhe,
             golden_tail_start_labels=gold_bts,
@@ -612,18 +640,30 @@ def run_epoch_stage_2(
     model.train()
     total_loss, n_batches = 0.0, 0
     for batch in tqdm(dataloader, desc=f"Stage 2 (tf={teacher_forcing_ratio:.2f})"):
-        X = batch[BraskDataset.BATCH_KEYS["EMBS"]].to(device) #(B, L, H)
-        X_mean = batch[BraskDataset.BATCH_KEYS["MEAN_EMBS"]].to(device) #(B, H)
+        description_embs = batch[BraskDataset.BATCH_KEYS["EMBS"]].to(device) #(B, L, H)
+        description_mean_embs = batch[BraskDataset.BATCH_KEYS["MEAN_EMBS"]].to(device) #(B, H)
         mask = batch[BraskDataset.BATCH_KEYS["EMBS_MASKS"]].to(device) #(B, L)
         golden_triples = batch[BraskDataset.BATCH_KEYS["GOLDEN_TRIPLES"]] # B lists  of triples
 
-        max_subjects_in_batch = get_max_subjects(golden_triples, rel2idx)
+
+        outputs = model(
+            description_embs,
+            description_mean_embs,
+            mask,
+            golden_triples,
+            
+            teacher_forcing_ratio,
+            semantic_rel_emb,
+            transe_rel_emb
+        )
+
+        unique_subjects_batch = outputs[MODEL_OUTPUT_KEYS["unique_subjects_batch"]]
 
         gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
         gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
-            triples_batch=golden_triples,
+            triples_batch= golden_triples,
+            unique_subjects_batch =unique_subjects_batch ,
             mask=mask,
-            max_subjects=max_subjects_in_batch,
             num_relations=num_relations,
             rel2idx=rel2idx
         )
@@ -639,22 +679,6 @@ def run_epoch_stage_2(
             "bwd_head_end": gold_bhe,
         }
 
-        use_gold = (torch.rand(1).item() < teacher_forcing_ratio)
-        if use_gold:
-            sk, sk_mask = build_sk_from_gold(golden_triples, mask, num_relations, max_subjects_in_batch, rel2idx)
-        else:
-            sk, sk_mask = model.extract_sk(X, mask, num_relations, max_subjects_in_batch)
-
-
-        outputs = model(
-            X,
-            X_mean,
-            mask,
-            sk,
-            sk_mask,
-            semantic_rel_emb,
-            transe_rel_emb
-        )
 
         loss, components = brask_loss(outputs, gold_labels, mask)
 
@@ -680,28 +704,39 @@ def evaluate(
     model.eval()
     total_loss, n_batches = 0.0, 0
     for batch in tqdm(dataloader, desc="Evaluation"):
-        X = batch[BraskDataset.BATCH_KEYS["EMBS"]].to(device) #(B, L, H)
-        X_mean = batch[BraskDataset.BATCH_KEYS["MEAN_EMBS"]].to(device) #(B, H)
+        description_embs = batch[BraskDataset.BATCH_KEYS["EMBS"]].to(device) #(B, L, H)
         mask = batch[BraskDataset.BATCH_KEYS["EMBS_MASKS"]].to(device) #(B, L)
         golden_triples = batch[BraskDataset.BATCH_KEYS["GOLDEN_TRIPLES"]] # B lists  of triples
+        description_mean_embs = batch[BraskDataset.BATCH_KEYS["MEAN_EMBS"]].to(device) #(B, H)
 
 
         gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
  
         if stage == 1:
-            fwd_head_start, fwd_head_end = model.fwd_head_predictor(X)
-            bwd_tail_start, bwd_tail_end = model.bwd_tail_predictor(X)
+            fwd_head_start_logits, fwd_head_end_logits = model.fwd_head_predictor(description_embs)
+            bwd_tail_start_logits, bwd_tail_end_logits = model.bwd_tail_predictor(description_embs)
             loss = stage1_loss(
-                fwd_head_start, fwd_head_end,
-                bwd_tail_start, bwd_tail_end,
-                gold_fhs, gold_fhe, gold_bts, gold_bte, mask
+                fwd_head_start_logits.squeeze(-1),
+                fwd_head_end_logits.squeeze(-1),
+                bwd_tail_start_logits.squeeze(-1),
+                bwd_tail_end_logits.squeeze(-1),
+                gold_fhs, gold_fhe, gold_bts, gold_bte, mask, pos_weight=1
             )
         else:
-            max_subjects_in_batch = get_max_subjects(golden_triples, rel2idx)
-            gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
-                triples_batch=golden_triples,
+            outputs = model.forward(
+                X=description_embs,
+                X_mean=description_mean_embs,
                 mask=mask,
-                max_subjects=max_subjects_in_batch,
+                golden_triples=golden_triples,
+                teacher_forcing_ratio=0.0,
+                semantic_rel_emb=semantic_rel_emb,
+                transe_rel_emb=transe_rel_emb
+            )
+            unique_subjects_batch = outputs[MODEL_OUTPUT_KEYS["unique_subjects_batch"]]
+            gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
+                triples_batch= golden_triples,
+                unique_subjects_batch =unique_subjects_batch ,
+                mask=mask,
                 num_relations=num_relations,
                 rel2idx=rel2idx
             )
@@ -711,10 +746,7 @@ def evaluate(
                 "fwd_tail_start": gold_fts, "fwd_tail_end": gold_fte,
                 "bwd_head_start": gold_bhs, "bwd_head_end": gold_bhe,
             }
-            # At eval always use model predictions (no teacher forcing)
-            sk, sk_mask = model.extract_sk(X, mask, num_relations, max_subjects_in_batch)
-            outputs = model.forward(X, X_mean, mask, sk, sk_mask, semantic_rel_emb, transe_rel_emb)
-            loss, _ = brask_loss(outputs, gold_labels, mask)
+            loss, _ = brask_loss(outputs, gold_labels, mask, pos_weight_entity=1, pos_weight_obj=1)
 
         total_loss += loss.item()
         n_batches  += 1
@@ -758,7 +790,8 @@ def main():
     ids_val   = description_embs_ids[:n_val]
 
     def make_dataset(ids):
-        idx = [description_embs_ids.index(i) for i in ids]
+        id_to_idx = {id_: i for i, id_ in enumerate(description_embs_ids)}
+        idx = [id_to_idx[i] for i in ids]
         return BraskDataset(
             description_embs=description_embs_all[idx],
             description_embs_ids=ids,
@@ -788,7 +821,7 @@ def main():
     optimizer = get_optimizer(model, stage=1)
 
     for epoch in range(stage1_epochs):
-        train_loss = run_epoch_stage1(model, train_loader, optimizer, max_length)
+        train_loss = run_epoch_stage1(model, train_loader, optimizer)
         val_loss   = evaluate(
                 model= model,
                 dataloader = val_loader,

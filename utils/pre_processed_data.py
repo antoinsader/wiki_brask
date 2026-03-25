@@ -129,6 +129,7 @@ class RawDataLoader:
         return self._get_minimized(self.min.GOLD_TRIPLES)
 
     def get_description_embeddings_all(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns description_embs_all, description_embs_ids, description_embs_masks"""
         description_embs_all = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDINGS_ALL, True)
         description_embs_ids = self._get_minimized(self.min.DESCRIPTION_EMBEDDINGS_IDS)
         description_embs_masks = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDING_ALL_MASKS)

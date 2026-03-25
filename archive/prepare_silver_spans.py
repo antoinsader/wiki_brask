@@ -129,7 +129,7 @@ def create_description_heads_tails_map_aliases(descriptions, triples, aliases):
 
 
 def main(use_minimized: bool):
-    max_descriptions_length = 128
+    max_descriptions_length = 256
     aliases_dict = data_loader.get_aliases(minimized=use_minimized)
     
     aliases_pattern_map = create_aliases_patterns_map(aliases_dict)

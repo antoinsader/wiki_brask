@@ -206,7 +206,7 @@ def test_extract_sk():
     forward_s_k = []
     all_spans =[]
     for b in range(B):
-        x_emb = x[b] #(5, 128)
+        x_emb = x[b] #(5, 256)
         start_idx  = (head_start[b].squeeze(-1) >= threshold_head_start).nonzero(as_tuple=False).squeeze(-1)
         start_idx = torch.sort(start_idx).values
         end_idx  = (head_end[b].squeeze(-1) >= threshold_head_end).nonzero(as_tuple=False).squeeze(-1)

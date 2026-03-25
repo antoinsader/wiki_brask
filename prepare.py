@@ -19,7 +19,7 @@ use_cuda = torch.cuda.is_available()
 device_str = "cuda" if use_cuda else "cpu"
 device = torch.device(device_str)
 num_workers = 4 if use_cuda else 0
-descriptions_max_length = 128
+descriptions_max_length = 256
 
 rel_embs_batch_size = 8192 if use_cuda else 32
 

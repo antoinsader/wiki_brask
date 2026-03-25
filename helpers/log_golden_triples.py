@@ -5,7 +5,7 @@ DESCRIPTIONS_PATH    = "../data/minimized/descriptions.pkl"
 RELATIONS_PATH = "../data/minimized/relations.pkl"
 TRIPLES_PATH = "../data/minimized/triples_train.pkl"
 ALIASES_PATH = "../data/minimized/aliases.pkl"
-DESCRIPTIONS_MAX_LENGTH = 128
+DESCRIPTIONS_MAX_LENGTH = 256
 
 
 from collections import defaultdict

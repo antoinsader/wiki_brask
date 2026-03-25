@@ -26,7 +26,7 @@ def main():
     model = AutoModel.from_pretrained('bert-base-cased')
     model = model.to(device)
     model.eval()
-    max_length = 128
+    max_length = 256
     H = model.config.hidden_size
 
     final_all_embs = init_mmap(out_all_embs, (N, max_length, H), "float32")

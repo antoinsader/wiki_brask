@@ -80,7 +80,7 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
     return sums / counts.clamp(min=1).unsqueeze(1)
 
 
-def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, out_all_embs: str, out_mean_embs: str, out_all_masks: str, max_length: int=128) -> bool:
+def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, out_all_embs: str, out_mean_embs: str, out_all_masks: str, max_length: int=256) -> bool:
     """Embed each sentence using BERT, and save into tensor files(mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
 
     model  = model.to(device)
