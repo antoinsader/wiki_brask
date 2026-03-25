@@ -211,6 +211,10 @@ def normalize():
 
 def embed_relations():
     relations = data_loader.get_relations(minimized=True)
+    triples = data_loader.get_triples_train(minimized=True)
+    relation_ids = set(t[1] for t in triples)
+    relations = {r: rels for r, rels in relations.items() if r in relation_ids}
+    del triples, relation_ids
     if not relations:
         print("Relations not found")
         return False

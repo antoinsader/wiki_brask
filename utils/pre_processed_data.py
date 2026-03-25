@@ -114,6 +114,12 @@ class RawDataLoader:
             return self._get_minimized(self.min.RELATIONS)
         return self._get(self.pkl.RELATIONS, self.raw.RELATIONS, self._parse_relations)
 
+    def get_rel2idx(self, minimized=False) -> dict:
+        if minimized:
+            return self._get_minimized(self.min.REL2IDX)
+        return self._get(self.pkl.REL2IDX, None, None)
+
+
     def get_silver_spans(self, minimized=False) -> dict:
         if minimized:
             return self._get_minimized(self.min.SILVER_SPANS)
@@ -128,8 +134,16 @@ class RawDataLoader:
         description_embs_masks = self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDING_ALL_MASKS)
         return description_embs_all, description_embs_ids, description_embs_masks
 
+
+
     def get_description_embeddings_mean(self) -> torch.Tensor:
         return self._get_minimized_tensor(self.min.DESCRIPTION_EMBEDDINGS_MEAN)
+
+    def get_semantic_relation_embeddings(self) -> torch.Tensor:
+        return self._get_minimized_tensor(self.min.RELATIONS_EMBEDDINGS)
+    def get_trane_relation_embeddings(self) -> torch.Tensor:
+        return self._get_minimized_tensor(self.min.TRANSE_MODEL_RESULTS)
+
 
     def cache_all(self):
         """Parse and cache every dataset. Skips files already cached."""

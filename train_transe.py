@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from utils.files import save_tensor
+from utils.files import cache_array, save_tensor
 from utils.pre_processed_data import data_loader, check_minimized_files
 from utils.settings import settings
 from TransE import TransEDataset, TransEModel 
@@ -126,7 +126,9 @@ def main():
 
     if local_rank == 0:
         out_path = settings.MINIMIZED_FILES.TRANSE_MODEL_RESULTS if use_minimized else settings.PREPROCESSED_FILES.TRANSE_MODEL_RESULTS
+        rel2idx_out = settings.MINIMIZED_FILES.REL2IDX if use_minimized else settings.PREPROCESSED_FILES.REL2IDX
         save_tensor(get_core_model().rel_embs.weight.data, out_path)
+        cache_array(dataset.rel2idx, rel2idx_out)
         print(f"Shape: {tuple(get_core_model().rel_embs.weight.data.shape)}  →  {out_path}")
 
 

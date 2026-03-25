@@ -328,49 +328,34 @@ class BraskModel(torch.nn.Module):
         self.threshold_tail_end = 0.5
         self.max_span_len = 10
 
-    def forward(self, batch, semantic_relation_embeddings, transe_relation_embeddings):
+    def forward(
+        self,
+        X,
+        X_mean,
+        mask,
+        sk,
+        sk_mask,
+        semantic_rel_emb,
+        transe_rel_emb
+    ):
 
 
         # B: batch size, L: sequence length, H: hidden dimension
-        description_embeddings = batch[0] # shape (B, L, H)
-        description_mean_embeddings = batch[1] # shape (B, H)
-        description_ids = batch[2] # shape (B,)
+        description_embeddings = X # shape (B, L, H)
+        description_mean_embeddings = X_mean # shape (B, H)
+        description_ids = mask # shape (B,)
 
         B, L, H = description_embeddings.shape
-
-
 
         # ! I should be careful to not allow logits for [PAD]
         forward_head_start_probs, forward_head_end_probs, f_head_start_logits, f_head_end_logits = self.forward_head_predict(description_embeddings)
         backward_tail_start_probs, backward_tail_end_probs, b_tail_start_logits, b_tail_end_logits = self.backward_tail_predict(description_embeddings)
 
-        forward_c, forward_a = self.semantic_relation_attention(description_embeddings, semantic_relation_embeddings, description_mean_embeddings)
-        backward_c, backward_a = self.trane_relation_attention(description_embeddings, transe_relation_embeddings, description_mean_embeddings)
+        forward_c, forward_a = self.semantic_relation_attention(description_embeddings, semantic_rel_emb, description_mean_embeddings)
+        backward_c, backward_a = self.trane_relation_attention(description_embeddings, transe_rel_emb, description_mean_embeddings)
 
-        # ?! During training: You use gold subject spans to build sk directly — no thresholding, no extract_sk. As discussed earlier this is teacher forcing.
-        # Extract sk
-        # ?! During training, should I train with my silver spans to extract_sk ? the gradients won't flow back through forward_head_start/end to the encoder. The paper trains subject extraction and object extraction jointly with a shared loss (Eq. 19).
-        # forward_sk, forward_sk_mask = extract_sk(
-        #     description_embeddings=description_embeddings,
-        #     start_probs=forward_head_start_probs,
-        #     end_probs=forward_head_end_probs,
-        #     start_threshold=self.threshold_head_start,
-        #     end_threshold=self.threshold_head_end,
-        #     max_span_length=self.max_span_len
-        #     )
-        # backward_sk, backward_sk_mask = extract_sk(
-        #     description_embeddings=description_embeddings,
-        #     start_probs=backward_tail_start_probs,
-        #     end_probs=backward_tail_end_probs,
-        #     start_threshold=self.threshold_tail_start,
-        #     end_threshold=self.threshold_tail_end,
-        #     max_span_length=self.max_span_len
-        # )
-
-
-
-        forward_hijk = self.fuse_extractor_forward(description_embeddings, forward_c, forward_sk, forward_sk_mask) # (B, R, max_num_subjects, L, H)
-        backward_hijk = self.fuse_extractor_backward(description_embeddings, backward_c, backward_sk, backward_sk_mask) # (B, R, max_num_subjects, L, H)
+        forward_hijk = self.fuse_extractor_forward(description_embeddings, forward_c, sk, mask) # (B, R, max_num_subjects, L, H)
+        backward_hijk = self.fuse_extractor_backward(description_embeddings, backward_c, sk, sk_mask) # (B, R, max_num_subjects, L, H)
 
         B, R, S, L, H = forward_hijk.shape
         _, _, forward_tails_start_logits, forward_tail_end_logits = self.forward_tail_predict(forward_hijk) # (B, R, S, L, 1)

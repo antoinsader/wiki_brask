@@ -41,6 +41,7 @@ class _PreprocessedFiles:
     TRANSE_MODEL_RESULTS: str = "transe_rel_embs.npz"
     SILVER_SPANS: str = "silver_spans.pkl"
 
+    REL2IDX: str = "rel2idx.pkl"
 
     def __post_init__(self):
         for attr in ["ALIASES", 
@@ -51,7 +52,8 @@ class _PreprocessedFiles:
                      "TRIPLES_TRAIN",
                      "RELATIONS_EMBEDDINGS",
                      "TRANSE_MODEL_RESULTS",
-                     "SILVER_SPANS",]:
+                     "SILVER_SPANS",
+                     "REL2IDX"]:
             filename = getattr(self, attr)
             setattr(self, attr, os.path.join(self.preprocessed_dir, filename))
 
@@ -77,8 +79,8 @@ class _MinimizedFiles:
     RELATIONS: str = "relations.pkl"
     DESCRIPTIONS: str = "descriptions.pkl"
     TRIPLES_TRAIN: str = "triples_train.pkl"
-    RELATIONS_EMBEDDINGS: str = "relation_embeddings.npz"
-    TRANSE_MODEL_RESULTS: str = "transe_rel_embs.npz"
+    RELATIONS_EMBEDDINGS: str = "relation_embeddings.npy"
+    TRANSE_MODEL_RESULTS: str = "transe_rel_embs.npy"
     SILVER_SPANS: str = "silver_spans.pkl"
     GOLD_TRIPLES: str = "golden_triples.pkl"
 
@@ -86,6 +88,8 @@ class _MinimizedFiles:
     DESCRIPTION_EMBEDDINGS_MEAN: str = "description_embeddings_mean.npy"
     DESCRIPTION_EMBEDDING_ALL_MASKS : str = "description_embeddings_all_masks.npy"
     DESCRIPTION_EMBEDDINGS_IDS : str = "description_embeddings_ids.pkl"
+
+    REL2IDX: str = "rel2idx.pkl"
 
     def __post_init__(self):
         for attr in ["ALIASES", 
@@ -99,7 +103,8 @@ class _MinimizedFiles:
                      "DESCRIPTION_EMBEDDINGS_MEAN",
                         "DESCRIPTION_EMBEDDING_ALL_MASKS",
                      "DESCRIPTION_EMBEDDINGS_IDS",
-                     "GOLD_TRIPLES"]:
+                     "GOLD_TRIPLES",
+                     "REL2IDX"]:
             filename = getattr(self, attr)
             setattr(self, attr, os.path.join(self.minimized_dir, filename))
 
