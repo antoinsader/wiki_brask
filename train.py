@@ -615,7 +615,9 @@ def run_epoch_stage1(
             golden_tail_end_labels=gold_bte,
             token_mask=mask
         )
-
+        if torch.isnan(loss):
+            print("  NaN loss detected — stopping")
+            break
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -681,9 +683,13 @@ def run_epoch_stage_2(
 
 
         loss, components = brask_loss(outputs, gold_labels, mask)
-
+        if torch.isnan(loss):
+            print("  NaN loss detected — stopping")
+            break
         optimizer.zero_grad()
         loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
 
