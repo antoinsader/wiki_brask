@@ -7,3 +7,4 @@ __pycache__
 draft.py
 helpers/golden_triples_log.txt
 checkpoints/
+test/data/
