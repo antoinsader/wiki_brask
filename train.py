@@ -620,6 +620,7 @@ def run_epoch_stage1(
             break
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
         n_batches += 1
@@ -689,12 +690,14 @@ def run_epoch_stage_2(
         optimizer.zero_grad()
         loss.backward()
         
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
 
 
         total_loss += loss.item()
         n_batches += 1
+        if n_batches % 100 == 0:
+            print(f"\t\t batch {n_batches}: {components}")
     return total_loss / (n_batches + 1e-8)
 
 @torch.no_grad()
@@ -752,7 +755,7 @@ def evaluate(
                 "fwd_tail_start": gold_fts, "fwd_tail_end": gold_fte,
                 "bwd_head_start": gold_bhs, "bwd_head_end": gold_bhe,
             }
-            loss, _ = brask_loss(outputs, gold_labels, mask, pos_weight_entity=1, pos_weight_obj=1)
+            loss, _ = brask_loss(outputs, gold_labels, mask, pos_weight_entity=1.0, pos_weight_obj=1.0)
 
         total_loss += loss.item()
         n_batches  += 1
@@ -762,9 +765,9 @@ def evaluate(
 
 def main():
     batch_size      = 16
-    stage1_epochs   = 10
-    stage2_epochs   = 10
-    stage3_epochs   = 20   # teacher forcing decays over these
+    stage1_epochs   = 100
+    stage2_epochs   = 100
+    stage3_epochs   = 128   # teacher forcing decays over these
     val_split       = 0.1
 
 
@@ -814,6 +817,7 @@ def main():
     model = BraskModel(hidden_dim=H, transe_rel_dim=transe_rel_dim).to(device)
 
     os.makedirs("checkpoints", exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(CHECKPOINTS_DIR, "brask_init.pt"))
     best_val_loss = float("inf")
 
 
