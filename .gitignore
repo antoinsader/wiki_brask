@@ -1,5 +1,6 @@
 myenv/
 venv_win/
+venv_lin/
 .venv/
 %USERPROFILE%
 data/

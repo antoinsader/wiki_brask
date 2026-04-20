@@ -45,7 +45,7 @@ NUM_WORKERS = 4 if use_cuda else 0
 
 CHECKPOINTS_DIR = "checkpoints/"
 
-LEARNING_RATE_STAGE_1 = 1e-4
+LEARNING_RATE_STAGE_1 = 1e-3
 LEARNING_RATE_STAGE_2 = 1e-5
 
 # Tune these if model predicts all zeros (increase) or all ones (decrease)

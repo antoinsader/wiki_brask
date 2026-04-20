@@ -142,6 +142,19 @@ def chunk_description_discover_aliases_spans(
 
     return triple_spans, not_found_triples
 
+def fix_relations(new_relations_ids):
+    old_relations_dict = data_loader.get_relations(True)
+    old_rel2idx = data_loader.get_rel2idx(True)
+    old_semantic_relations = data_loader.get_semantic_relation_embeddings()
+    old_trane_relations = data_loader.get_trane_relation_embeddings()
+
+    new_relations_dict = {r: old_relations_dict[r] for r in new_relations_ids if r in old_relations_dict}
+    new_rel2idx = {r: idx for idx, r in enumerate(new_relations_ids)}
+    new_semantic_relations = np.array([old_semantic_relations[old_rel2idx[r]] for r in new_relations_ids if r in old_rel2idx])
+    new_trane_relations = np.array([old_trane_relations[old_rel2idx[r]] for r in new_relations_ids if r in old_rel2idx])
+
+    return new_relations_dict, new_rel2idx, new_trane_relations, new_semantic_relations
+
 
 def main(use_minimized):
     max_descriptions_length = 256
@@ -192,13 +205,18 @@ def main(use_minimized):
     triples_without_gold = []
     new_triples = []
     new_descriptions = {}
+    new_relations_ids = set()
     not_found_set = {h: set(pairs) for h, pairs in not_found_triples_all.items()}
     for h,r,t in triples:
         if h in results_all and (r, t) not in not_found_set.get(h, set()):
             new_triples.append((h,r,t))
             new_descriptions[h] = descriptions[h]
+            new_relations_ids.add(r)
         else:
             triples_without_gold.append((h,r,t))
+
+    new_relations_dict, new_rel2idx, new_trane_relations, new_semantic_relations = fix_relations(new_relations_ids)
+
 
 
     print(f"  {len(triples_without_gold)}/{len(triples)} triples don't have gold triples")
@@ -206,19 +224,31 @@ def main(use_minimized):
     print(f"Triples number was reduced from {len(triples)} to {len(new_triples)}")
     del aliases_dict, aliases_pattern_map, descriptions, triples
 
+
+
+
     descriptions_embeddings_ids = read_cached_array(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
     description_embeddings = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL, mmap=True)
     print("Creating mask")
     mask = np.array([id_ in set(new_descriptions.keys())
                 for id_ in descriptions_embeddings_ids])
-    N_new = mask.sum()
+    N_new = int(mask.sum())
     B, L, H = description_embeddings.shape
-    tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + ".tmp.npy"
+    B, L, H = int(B), int(L), int(H)  
+    tmp_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL + "_tmp.npy"
     print(f"Starting to do filtering on description embeddings, new size will be {B} -->> {N_new} ")
     description_embeddings_new = init_mmap(tmp_path, (N_new, L, H), "float32")
-    description_embeddings_new[:] = description_embeddings[mask]
+
+    src_indices = np.where(mask)[0]
+    chunk_size  = 1000
+    for start in range(0, len(src_indices), chunk_size):
+        end      = min(start + chunk_size, len(src_indices))
+        dst_rows = slice(start, end)
+        src_rows = src_indices[start:end]
+        description_embeddings_new[dst_rows] = description_embeddings[src_rows]
+
     description_embeddings_new.flush()
-    del description_embeddings, description_embeddings_new
+
     os.replace(tmp_path, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL)
 
     print(f"Reducing description embeddings mean and masks")
@@ -241,7 +271,12 @@ def main(use_minimized):
     cache_array(results_all, settings.MINIMIZED_FILES.GOLD_TRIPLES)
     cache_array(new_triples, settings.MINIMIZED_FILES.TRIPLES_TRAIN)
     cache_array(new_descriptions, settings.MINIMIZED_FILES.DESCRIPTIONS)
+    cache_array(new_relations_dict, settings.MINIMIZED_FILES.RELATIONS)
+    cache_array(new_rel2idx, settings.MINIMIZED_FILES.REL2IDX)
+    cache_array(new_trane_relations, settings.MINIMIZED_FILES.TRANSE_MODEL_RESULTS)
 
+    new_semantic_relations = torch.from_numpy(new_semantic_relations)
+    save_tensor(new_semantic_relations, settings.MINIMIZED_FILES.RELATIONS_EMBEDDINGS)
 
 if __name__=="__main__":
     main(True)
