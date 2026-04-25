@@ -2,6 +2,7 @@ from collections import defaultdict
 import random
 import torch
 import os
+import pandas as pd
 from transformers import BertModel, BertTokenizerFast, AutoModel
 
 from tqdm import tqdm
@@ -64,31 +65,43 @@ def choose_random_ids(ids_list, n):
     return set(random.sample(_ids_has_everything, n))
 
 
-
+def minimmizing_triples(minimized_triples_ids, raw_fp, min_files ):
+    CHUNK = 500_000
+    relation_ids_min = set()
+    tails_entity_ids_min = set()
+    triples_min = []
+    for chunk in tqdm(
+        pd.read_csv(
+            raw_fp, sep="\t", header=None,
+            names=["head", "relation", "tail"],
+            dtype=str, chunksize=CHUNK,
+            usecols=[0, 1, 2],
+            on_bad_lines="skip",
+        ),
+        desc="Filtering triples",
+    ):
+        chunk.dropna(subset=["head", "relation", "tail"], inplace=True)
+        filtered = chunk[chunk["head"].isin(minimized_triples_ids)]
+        triples_min.extend(filtered.itertuples(index=False, name=None))
+        relation_ids_min.update(filtered["relation"])
+        tails_entity_ids_min.update(filtered["tail"])
+    cache_array(triples_min, min_files.TRIPLES_TRAIN)
+    print(f"\t Triple heads minimization finished  : {len(triples_min):,} -> {min_files.TRIPLES_TRAIN}")
+    del triples_min
+    return relation_ids_min,tails_entity_ids_min 
 
 def minimize(minimized_triples_ids):
 
     min_files = settings.MINIMIZED_FILES
     raw_fp = settings.RAW_FILES.TRIPLES_TRAIN
     print("minimizing triples")
+    relation_ids_min, tails_entity_ids_min = minimmizing_triples(
+        minimized_triples_ids,
+        raw_fp=raw_fp,
+        min_files=min_files
+    )
 
 
-
-    relation_ids_min = set()
-    tails_entity_ids_min = set()
-    triples_min = []
-    with open(raw_fp, "r", encoding="utf-8") as f:
-        for line in tqdm(f, desc="Filtering triples"):
-            parts = line.strip().split("\t")
-            if len(parts) == 3:
-                head, relation, tail = parts
-                if head in minimized_triples_ids:
-                    triples_min.append((head, relation, tail))
-                    relation_ids_min.add(relation)
-                    tails_entity_ids_min.add(tail)
-    cache_array(triples_min, min_files.TRIPLES_TRAIN)
-    print(f"\t Triple heads minimization finished  : {len(triples_min):,} -> {min_files.TRIPLES_TRAIN}")
-    del triples_min
 
 
     print("minimizing aliases")
