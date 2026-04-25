@@ -289,7 +289,7 @@ def embed_descriptions():
     return success
 
 def main():
-    answer = timed_input("Do you want to perform minimization on dictionaries? [Y/n]")
+    answer = timed_input("Do you want to perform minimization on dictionaries? [Y/n]").lower().strip()
     if answer == "y":
         all_triples_ids, minmized_n_triples = introduction()
         if minmized_n_triples == 0:
@@ -301,7 +301,7 @@ def main():
     else:
         print("Skipping minimization")
 
-    answer = timed_input("Do you want to perform normalization on aliases and descriptions? [Y/n]")
+    answer = timed_input("Do you want to perform normalization on aliases and descriptions? [Y/n]").lower().strip()
     if answer == "y":
         print(f"starting to normalize descriptions and aliases")
         res = normalize()
@@ -312,7 +312,7 @@ def main():
         print("Skipping normalization")
 
 
-    answer = timed_input("Do you want to perform relation embeddings? [Y/n]")
+    answer = timed_input("Do you want to perform relation embeddings? [Y/n]").lower().strip()
     if answer == "y":
         print(f"Starting to embed relations..")
         res = embed_relations()
@@ -322,7 +322,7 @@ def main():
     else:
         print("skipping relation embeddings")
 
-    answer = timed_input("Do you want to perform description embeddings? [Y/n]")
+    answer = timed_input("Do you want to perform description embeddings? [Y/n]").lower().strip()
     if answer == "y":
         print(f"Starting to embed descriptions..")
         res = embed_descriptions()
