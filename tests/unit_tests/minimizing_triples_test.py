@@ -38,7 +38,6 @@ def test_triple_count_matches(minimized_triples_ids, run_minimizing):
 
 
 def test_triples_are_valid_tuples(run_minimizing):
-    
     saved = read_cached_array(run_minimizing.TRIPLES_TRAIN)
     for i, triple in enumerate(saved):
         assert len(triple) == 3, f"Triple at index {i} does not have 3 elements: {triple}"

@@ -1,10 +1,14 @@
 from collections import defaultdict
+import multiprocessing
 import random
 import torch
 import os
 import pandas as pd
 from transformers import BertModel, BertTokenizerFast, AutoModel
 
+from io import StringIO
+
+from joblib import Parallel, delayed
 from tqdm import tqdm
 
 
@@ -65,30 +69,52 @@ def choose_random_ids(ids_list, n):
     return set(random.sample(_ids_has_everything, n))
 
 
-def minimmizing_triples(minimized_triples_ids, raw_fp, min_files ):
-    CHUNK = 500_000
-    relation_ids_min = set()
-    tails_entity_ids_min = set()
-    triples_min = []
-    for chunk in tqdm(
-        pd.read_csv(
-            raw_fp, sep="\t", header=None,
-            names=["head", "relation", "tail"],
-            dtype=str, chunksize=CHUNK,
-            usecols=[0, 1, 2],
-            on_bad_lines="skip",
-        ),
-        desc="Filtering triples",
-    ):
-        chunk.dropna(subset=["head", "relation", "tail"], inplace=True)
-        filtered = chunk[chunk["head"].isin(minimized_triples_ids)]
-        triples_min.extend(filtered.itertuples(index=False, name=None))
-        relation_ids_min.update(filtered["relation"])
-        tails_entity_ids_min.update(filtered["tail"])
+def _find_byte_boundaries(filepath, n_parts):
+    size = os.path.getsize(filepath)
+    boundaries = [0]
+    with open(filepath, 'rb') as f:
+        for i in range(1, n_parts):
+            f.seek(i * size // n_parts)
+            f.readline()  # advance past the partial line at the split point
+            boundaries.append(f.tell())
+    boundaries.append(size)
+    return boundaries
+
+
+def _filter_partition(filepath, start, end, minimized_ids):
+    with open(filepath, 'rb') as f:
+        f.seek(start)
+        raw = f.read(end - start).decode('utf-8', errors='replace')
+    chunk = pd.read_csv(
+        StringIO(raw), sep='\t', header=None,
+        names=['head', 'relation', 'tail'], dtype=str,
+        on_bad_lines='skip', usecols=[0, 1, 2],
+    )
+    chunk.dropna(subset=['head', 'relation', 'tail'], inplace=True)
+    filtered = chunk[chunk['head'].isin(minimized_ids)]
+    triples = list(zip(filtered['head'], filtered['relation'], filtered['tail']))
+    return triples, set(filtered['relation']), set(filtered['tail'])
+
+
+def minimmizing_triples(minimized_triples_ids, raw_fp, min_files):
+    n_workers = multiprocessing.cpu_count()
+    boundaries = _find_byte_boundaries(raw_fp, n_workers)
+
+    results = Parallel(n_jobs=n_workers, backend='loky')(
+        delayed(_filter_partition)(raw_fp, boundaries[i], boundaries[i + 1], minimized_triples_ids)
+        for i in tqdm(range(n_workers), desc="Filtering triples (parallel)")
+    )
+
+    triples_min, relation_ids_min, tails_entity_ids_min = [], set(), set()
+    for triples, rels, tails in results:
+        triples_min.extend(triples)
+        relation_ids_min.update(rels)
+        tails_entity_ids_min.update(tails)
+
     cache_array(triples_min, min_files.TRIPLES_TRAIN)
-    print(f"\t Triple heads minimization finished  : {len(triples_min):,} -> {min_files.TRIPLES_TRAIN}")
+    print(f"\t Triple heads minimization finished: {len(triples_min):,} -> {min_files.TRIPLES_TRAIN}")
     del triples_min
-    return relation_ids_min,tails_entity_ids_min 
+    return relation_ids_min, tails_entity_ids_min
 
 def minimize(minimized_triples_ids):
 
@@ -141,7 +167,7 @@ def minimize(minimized_triples_ids):
     return True
 
 
-def introduction() -> tuple[list, int]:
+def get_minimized_ids() -> tuple[list, int]:
     print("Scanning raw files..")
     raw = settings.RAW_FILES
     full_files = settings.PREPROCESSED_FILES
@@ -291,7 +317,7 @@ def embed_descriptions():
 def main():
     answer = timed_input("Do you want to perform minimization on dictionaries? [Y/n]").lower().strip()
     if answer == "y":
-        all_triples_ids, minmized_n_triples = introduction()
+        all_triples_ids, minmized_n_triples = get_minimized_ids()
         if minmized_n_triples == 0:
             return
 

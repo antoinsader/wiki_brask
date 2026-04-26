@@ -39,6 +39,12 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
             all_aliases.append(alias)
             rel_indices.append(i)
 
+    # Sort by character length so each batch has similarly-sized sequences,
+    # minimising padding tokens and reducing total BERT computation.
+    order = sorted(range(len(all_aliases)), key=lambda i: len(all_aliases[i]))
+    all_aliases = [all_aliases[i] for i in order]
+    rel_indices = [rel_indices[i] for i in order]
+
     rel_idx_tensor = torch.tensor(rel_indices, dtype=torch.int64, device=device)
 
     sums = torch.zeros(n_rels, 768, dtype=torch.float32, device=device)
@@ -90,38 +96,47 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     N = len(sentences)
     H = model.config.hidden_size
 
-    mm_all_embs = init_mmap(out_all_embs, shape=(N, max_length, H), dtype="float32")
+    # float16 halves the on-disk size vs float32, which prevents bus errors
+    # when N is large (e.g. 40K sentences × 256 × 768 × 2 bytes ≈ 19 GB).
+    mm_all_embs = init_mmap(out_all_embs, shape=(N, max_length, H), dtype="float16")
+
+    if use_cuda:
+        autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16)
+    else:
+        autocast_ctx = torch.autocast(device_type="cpu")
 
     final_mean_embs = torch.zeros(N, H, dtype=torch.float32)
     final_all_masks = torch.zeros(N, max_length, dtype=torch.int64)
-    for start in tqdm(range(0, len(sentences), batch_size) , desc="Embedding senteneces"):
-        end = min(start + batch_size, len(sentences))
-        chunk = sentences[start: end]
-        enc = tokenizer(
-            chunk,
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt"
-        )
-        input_ids = enc["input_ids"].to(device)
-        attention_mask = enc["attention_mask"].to(device)
+    with torch.no_grad():
+        for start in tqdm(range(0, len(sentences), batch_size), desc="Embedding sentences"):
+            end = min(start + batch_size, len(sentences))
+            chunk = sentences[start: end]
+            enc = tokenizer(
+                chunk,
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt"
+            )
+            input_ids = enc["input_ids"].to(device)
+            attention_mask = enc["attention_mask"].to(device)
 
-        with torch.no_grad():
-            out = model(input_ids=input_ids, attention_mask=attention_mask)
-            embs = out.last_hidden_state #(B, L, H)
-        attention_mask_exp = attention_mask.unsqueeze(-1).float() #(B, L, 1)
-        sum_embs = (embs * attention_mask_exp).sum(dim=1) #(B, H)
-        token_counts = attention_mask_exp.sum(dim=1).clamp(min=1) #(B, 1)
-        mean_embs = sum_embs / token_counts #(B, H)
+            with autocast_ctx:
+                out = model(input_ids=input_ids, attention_mask=attention_mask)
+                embs = out.last_hidden_state  # (B, L, H)
 
-        final_mean_embs[start:end] = mean_embs.cpu()
-        mm_all_embs[start:end] = embs.cpu().numpy()
-        final_all_masks[start:end] = attention_mask.cpu() # B,L
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-    mm_all_embs.flush() # ensure all data is written to disk
-    del mm_all_embs # close memmap
+            attention_mask_exp = attention_mask.unsqueeze(-1).float()  # (B, L, 1)
+            sum_embs = (embs.float() * attention_mask_exp).sum(dim=1)  # (B, H)
+            token_counts = attention_mask_exp.sum(dim=1).clamp(min=1)  # (B, 1)
+            mean_embs = sum_embs / token_counts  # (B, H)
+
+            final_mean_embs[start:end] = mean_embs.cpu()
+            mm_all_embs[start:end] = embs.cpu().half().numpy()
+            final_all_masks[start:end] = attention_mask.cpu()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+    mm_all_embs.flush()
+    del mm_all_embs
 
     save_tensor(final_mean_embs, out_mean_embs)
     del final_mean_embs
