@@ -92,7 +92,7 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     model = model.to(device)
     model.eval()
     # 3090 has 24 GB VRAM; 512 fills the GPU without going OOM for BERT-base.
-    batch_size = 256 if use_cuda else 32
+    batch_size = 512 if use_cuda else 32
 
     N = len(sentences)
     H = model.config.hidden_size
