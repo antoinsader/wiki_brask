@@ -2,18 +2,16 @@ import os
 import pytest
 
 from prepare import choose_random_ids, minimmizing_triples
-from utils.files import read_cached_array
+from utils.files import read_cached_array, scan_text_file_lines
 from utils.settings import settings
 
 
 @pytest.fixture(scope="module")
 def minimized_triples_ids():
-    full_files = settings.PREPROCESSED_FILES
-    full_triples = read_cached_array(full_files.TRIPLES_TRAIN)
-    triples_ids = [t[0] for t in full_triples]
-    total = len(triples_ids)
-    n = max(1, int(total * 0.0001))
-    return choose_random_ids(triples_ids, n)
+    raw = settings.RAW_FILES
+    total_train_triples, all_triples_ids = scan_text_file_lines(raw.TRIPLES_TRAIN, scan_head_ids=True)
+    n = max(1, int(total_train_triples * 0.0001))
+    return choose_random_ids(all_triples_ids, n)
 
 
 @pytest.fixture(scope="module")
@@ -40,6 +38,7 @@ def test_triple_count_matches(minimized_triples_ids, run_minimizing):
 
 
 def test_triples_are_valid_tuples(run_minimizing):
+    
     saved = read_cached_array(run_minimizing.TRIPLES_TRAIN)
     for i, triple in enumerate(saved):
         assert len(triple) == 3, f"Triple at index {i} does not have 3 elements: {triple}"
