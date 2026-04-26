@@ -291,25 +291,30 @@ def embed_descriptions():
     out_all_embs = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL
     out_all_masks = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS
     out_ids = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS
-    sentences = list(descriptions.values())
+
+    # Sort by description length so batches contain similarly-sized sequences,
+    # which minimises padding waste inside save_descriptions_embedding.
+    sorted_items = sorted(descriptions.items(), key=lambda kv: len(kv[1]))
+    ids = [k for k, _ in sorted_items]
+    sentences = [v for _, v in sorted_items]
 
     tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
     model = AutoModel.from_pretrained('bert-base-cased')
 
     success = save_descriptions_embedding(
-        tokenizer=tokenizer, 
-        model=model, 
-        sentences= sentences, 
-        device=device, 
-        use_cuda=use_cuda, 
+        tokenizer=tokenizer,
+        model=model,
+        sentences=sentences,
+        device=device,
+        use_cuda=use_cuda,
         out_all_embs=out_all_embs,
-        out_mean_embs =out_mean_embs,
+        out_mean_embs=out_mean_embs,
         out_all_masks=out_all_masks,
         max_length=descriptions_max_length,
     )
 
     if success:
-        cache_array(list(descriptions.keys()), out_ids)
+        cache_array(ids, out_ids)
         print(f"Saved -> {out_mean_embs},  {out_all_embs},  {out_all_masks}, {out_ids}")
 
     return success

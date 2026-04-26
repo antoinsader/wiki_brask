@@ -89,15 +89,15 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
 def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, out_all_embs: str, out_mean_embs: str, out_all_masks: str, max_length: int=256) -> bool:
     """Embed each sentence using BERT, and save into tensor files(mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
 
-    model  = model.to(device)
+    model = model.to(device)
     model.eval()
-    batch_size = 128 if use_cuda else 32
+    # 3090 has 24 GB VRAM; 512 fills the GPU without going OOM for BERT-base.
+    batch_size = 512 if use_cuda else 32
 
     N = len(sentences)
     H = model.config.hidden_size
 
-    # float16 halves the on-disk size vs float32, which prevents bus errors
-    # when N is large (e.g. 40K sentences × 256 × 768 × 2 bytes ≈ 19 GB).
+    # float16 halves the on-disk size vs float32, preventing bus errors on large N.
     mm_all_embs = init_mmap(out_all_embs, shape=(N, max_length, H), dtype="float16")
 
     if use_cuda:
@@ -105,36 +105,40 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     else:
         autocast_ctx = torch.autocast(device_type="cpu")
 
+    # Pre-tokenize all sentences without padding. BertTokenizerFast handles
+    # 32K sentences in a few seconds. We then pad each batch to its own max
+    # length (dynamic padding) instead of the global max_length, which can cut
+    # the number of tokens per batch by 5-10× for short descriptions.
+    print("Pre-tokenizing...")
+    all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
+
     final_mean_embs = torch.zeros(N, H, dtype=torch.float32)
     final_all_masks = torch.zeros(N, max_length, dtype=torch.int64)
+
     with torch.no_grad():
-        for start in tqdm(range(0, len(sentences), batch_size), desc="Embedding sentences"):
-            end = min(start + batch_size, len(sentences))
-            chunk = sentences[start: end]
-            enc = tokenizer(
-                chunk,
-                padding="max_length",
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt"
-            )
+        for start in tqdm(range(0, N, batch_size), desc="Embedding sentences"):
+            end = min(start + batch_size, N)
+
+            # Pad this batch only to its own longest sequence (dynamic padding).
+            batch_enc = {k: all_enc[k][start:end] for k in all_enc}
+            enc = tokenizer.pad(batch_enc, padding=True, return_tensors="pt")
             input_ids = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
 
             with autocast_ctx:
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
-                embs = out.last_hidden_state  # (B, L, H)
+                embs = out.last_hidden_state  # (B, L, H); L = batch max len ≤ max_length
 
             attention_mask_exp = attention_mask.unsqueeze(-1).float()  # (B, L, 1)
             sum_embs = (embs.float() * attention_mask_exp).sum(dim=1)  # (B, H)
             token_counts = attention_mask_exp.sum(dim=1).clamp(min=1)  # (B, 1)
             mean_embs = sum_embs / token_counts  # (B, H)
 
+            B, L, _ = embs.shape
             final_mean_embs[start:end] = mean_embs.cpu()
-            mm_all_embs[start:end] = embs.cpu().half().numpy()
-            final_all_masks[start:end] = attention_mask.cpu()
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
+            mm_all_embs[start:end, :L] = embs.cpu().half().numpy()
+            final_all_masks[start:end, :L] = attention_mask.cpu()
+
     mm_all_embs.flush()
     del mm_all_embs
 
