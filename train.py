@@ -45,12 +45,12 @@ NUM_WORKERS = 4 if use_cuda else 0
 
 CHECKPOINTS_DIR = "checkpoints/"
 
-LEARNING_RATE_STAGE_1 = 1e-3
+LEARNING_RATE_STAGE_1 = 1e-4
 LEARNING_RATE_STAGE_2 = 1e-5
 
 # Tune these if model predicts all zeros (increase) or all ones (decrease)
-POS_WEIGHT_ENTITY = 10.0   # for head/tail entity extractors (stage 1)
-POS_WEIGHT_OBJ    = 10.0   # for fused object/subject predictors (stage 2 and 3)
+POS_WEIGHT_ENTITY = 7.9   # for head/tail entity extractors (stage 1)
+POS_WEIGHT_OBJ    = 7.9   # for fused object/subject predictors (stage 2 and 3)
 
 
 
@@ -114,8 +114,8 @@ class BraskDataset(Dataset):
 def collate_fn(batch):
     return {
         BraskDataset.BATCH_KEYS["EMBS"]: torch.stack([b[BraskDataset.BATCH_KEYS["EMBS"]] for b in batch], dim=0), #(B, L, H)
-        BraskDataset.BATCH_KEYS["MEAN_EMBS"]: torch.stack([b[BraskDataset.BATCH_KEYS["MEAN_EMBS"]] for b in batch], dim=0), #(B, L)
-        BraskDataset.BATCH_KEYS["EMBS_MASKS"]: torch.stack([b[BraskDataset.BATCH_KEYS["EMBS_MASKS"]] for b in batch], dim=0), #(B, H)
+        BraskDataset.BATCH_KEYS["MEAN_EMBS"]: torch.stack([b[BraskDataset.BATCH_KEYS["MEAN_EMBS"]] for b in batch], dim=0), #(B, H)
+        BraskDataset.BATCH_KEYS["EMBS_MASKS"]: torch.stack([b[BraskDataset.BATCH_KEYS["EMBS_MASKS"]] for b in batch], dim=0), #(B, L)
         BraskDataset.BATCH_KEYS["GOLDEN_TRIPLES"]: [b[BraskDataset.BATCH_KEYS["GOLDEN_TRIPLES"]] for b in batch], # B list [list]
         BraskDataset.BATCH_KEYS["ENTITY_ID"]: [b[BraskDataset.BATCH_KEYS["ENTITY_ID"]] for b in batch], # B list[str]
     }
@@ -144,82 +144,105 @@ def build_gold_entity_labels(triples_batch, mask) -> tuple[torch.Tensor, torch.T
 
     return fwd_head_start, fwd_head_end, bwd_tail_start, bwd_tail_end
 
-def build_gold_tail_labels(triples_batch, unique_subjects_batch, mask, num_relations, rel2idx):
-    """Returns (B,R,S, L) for forward tail and backward head."""
+def build_gold_tail_labels(
+    triples_batch, unique_subjects_fwd, unique_subjects_bwd, mask, num_relations, rel2idx
+):
+    """Returns (B,R,S_fwd,L) for forward tails and (B,R,S_bwd,L) for backward heads.
 
-
+    unique_subjects_fwd: head spans used as subject keys in the forward extractor.
+    unique_subjects_bwd: tail spans used as subject keys in the backward extractor.
+    """
     B, L = mask.shape
-    R= num_relations
-    unique_subjects = [s if s else [(0, 0)] for s in unique_subjects_batch]
-    S = max(len(s) for s in unique_subjects)
-    gold_fwd_tail_start = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
-    gold_fwd_tail_end = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
-    gold_bwd_head_start = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
-    gold_bwd_head_end = torch.zeros(B, R, S, L, dtype=torch.float32, device=device)
+    R = num_relations
+
+    unique_fwd = [s if s else [(0, 0)] for s in unique_subjects_fwd]
+    unique_bwd = [s if s else [(0, 0)] for s in unique_subjects_bwd]
+    S_fwd = max(len(s) for s in unique_fwd)
+    S_bwd = max(len(s) for s in unique_bwd)
+
+    gold_fwd_tail_start  = torch.zeros(B, R, S_fwd, L, dtype=torch.float32, device=device)
+    gold_fwd_tail_end    = torch.zeros(B, R, S_fwd, L, dtype=torch.float32, device=device)
+    gold_bwd_head_start  = torch.zeros(B, R, S_bwd, L, dtype=torch.float32, device=device)
+    gold_bwd_head_end    = torch.zeros(B, R, S_bwd, L, dtype=torch.float32, device=device)
 
     for b, triples in enumerate(triples_batch):
-        span_to_slot = {span: idx for idx, span in enumerate(unique_subjects[b])}
+        fwd_slot = {span: idx for idx, span in enumerate(unique_fwd[b])}
+        bwd_slot = {span: idx for idx, span in enumerate(unique_bwd[b])}
         for (hs, he), r, (ts, te) in triples:
-            r_idx = rel2idx[r]
-            s_idx = span_to_slot.get((hs, he))
-            if s_idx is None or s_idx >= S:
+            if r not in rel2idx:
                 continue
-            if ts < L:
-                gold_fwd_tail_start[b, r_idx, s_idx, ts] = 1.0
-            if te < L:
-                gold_fwd_tail_end[b,   r_idx, s_idx, te] = 1.0
-            if hs < L:
-                gold_bwd_head_start[b, r_idx, s_idx, hs] = 1.0
-            if he < L:
-                gold_bwd_head_end[b,   r_idx, s_idx, he] = 1.0
+            r_idx = rel2idx[r]
 
+            # forward: given head (hs,he) → predict tail position
+            s_fwd = fwd_slot.get((hs, he))
+            if s_fwd is not None and s_fwd < S_fwd:
+                if ts < L:
+                    gold_fwd_tail_start[b, r_idx, s_fwd, ts] = 1.0
+                if te < L:
+                    gold_fwd_tail_end[b,   r_idx, s_fwd, te] = 1.0
+
+            # backward: given tail (ts,te) → predict head position
+            s_bwd = bwd_slot.get((ts, te))
+            if s_bwd is not None and s_bwd < S_bwd:
+                if hs < L:
+                    gold_bwd_head_start[b, r_idx, s_bwd, hs] = 1.0
+                if he < L:
+                    gold_bwd_head_end[b,   r_idx, s_bwd, he] = 1.0
 
     return gold_fwd_tail_start, gold_fwd_tail_end, gold_bwd_head_start, gold_bwd_head_end
 
 
 
-def build_sk_from_gold(triples_batch, X: torch.Tensor, mask :torch.Tensor):
-    """Returns sk (B, S, H) and sk_mask (B, S).S = max unique subjects across batch."""
+def _span_repr(X: torch.Tensor, b: int, s: int, e: int) -> torch.Tensor:
+    """Mean-pool token embeddings over [s, e] inclusive."""
+    return X[b, s:e + 1].mean(dim=0)
+
+
+def build_sk_from_gold(triples_batch, X: torch.Tensor, mask: torch.Tensor, use_tail: bool = False):
+    """Returns sk (B, S, H), sk_mask (B, S), unique_spans.
+
+    use_tail=False → sk built from head (subject) spans (forward extraction).
+    use_tail=True  → sk built from tail (object) spans (backward extraction).
+    """
     B, L, H = X.shape
-    unique_subjects = []
+    unique_spans = []
     for b, t in enumerate(triples_batch):
         seen = {}
         ordered = []
-        for (hs, he), r, _ in t:
-            if (hs, he) not in seen:
-                if hs >= L or he >= L or mask[b, hs] == 0.0 or mask[b, he] == 0.0:
+        for (hs, he), r, (ts, te) in t:
+            span = (ts, te) if use_tail else (hs, he)
+            s0, e0 = span
+            if span not in seen:
+                if s0 >= L or e0 >= L or mask[b, s0] == 0.0 or mask[b, e0] == 0.0:
                     continue
-                seen[(hs, he)] = len(ordered)
-                ordered.append((hs, he))
-        unique_subjects.append(ordered)
+                seen[span] = len(ordered)
+                ordered.append(span)
+        unique_spans.append(ordered)
 
-
-    unique_subjects = [s if s else [(0, 0)] for s in unique_subjects]
-    S = max(len(s) for s in unique_subjects)
+    unique_spans = [s if s else [(0, 0)] for s in unique_spans]
+    S = max(len(s) for s in unique_spans)
     sk = torch.zeros(B, S, H, dtype=torch.float32, device=X.device)
     sk_mask = torch.zeros(B, S, dtype=torch.float32, device=X.device)
-    for b, subjects in enumerate(unique_subjects):
-        for s_idx, (hs, he) in enumerate(subjects):
-            sk[b, s_idx] = (X[b, hs] + X[b, he]) / 2.0
+    for b, spans in enumerate(unique_spans):
+        for s_idx, (s0, e0) in enumerate(spans):
+            sk[b, s_idx] = _span_repr(X, b, s0, e0)
             sk_mask[b, s_idx] = 1.0
-    return sk, sk_mask, unique_subjects
+    return sk, sk_mask, unique_spans
 
-def build_sk_prediction(X,mask, fwd_head_start_logits, fwd_head_end_logits, threshold:float=0.5, max_span_length:int=10):
+def build_sk_prediction(X, mask, start_logits, end_logits, threshold: float = 0.5, max_span_length: int = 10):
     """
-        X: (B, L, H)
-        mask: (B, L)
-        fwd_head_start_logits: (B, L)
-        fwd_head_end_logits: (B, L)
+    Extract spans from predicted start/end logits and return sk embeddings.
 
+    X: (B, L, H)
+    mask: (B, L)
+    start_logits: (B, L)  — head start (forward) or tail start (backward)
+    end_logits:   (B, L)  — head end   (forward) or tail end   (backward)
     """
-    
-
-
     B, L, H = X.shape
-    unique_subjects = []
+    unique_spans = []
     for b in range(B):
-        start_probs = torch.sigmoid(fwd_head_start_logits[b])
-        end_probs   = torch.sigmoid(fwd_head_end_logits[b])
+        start_probs = torch.sigmoid(start_logits[b])
+        end_probs   = torch.sigmoid(end_logits[b])
         start_positions = (start_probs >= threshold).nonzero(as_tuple=False).squeeze(-1)
         end_positions   = (end_probs   >= threshold).nonzero(as_tuple=False).squeeze(-1)
         spans = []
@@ -237,22 +260,21 @@ def build_sk_prediction(X,mask, fwd_head_start_logits, fwd_head_end_logits, thre
                 e = min(valid_ends)
                 spans.append((s, e))
                 consumed.add(e)
-        unique_subjects.append(spans)
-    unique_subjects = [s if s else [(0, 0)] for s in unique_subjects]
-    S = max((len(subjects) for subjects in unique_subjects), default=1)    
+        unique_spans.append(spans)
+    unique_spans = [s if s else [(0, 0)] for s in unique_spans]
+    S = max((len(spans) for spans in unique_spans), default=1)
     sk      = torch.zeros(B, S, H, dtype=torch.float32, device=X.device)
     sk_mask = torch.zeros(B, S,    dtype=torch.float32, device=X.device)
-    for b, subjects in enumerate(unique_subjects):
-        for s_idx, (hs, he) in enumerate(subjects):
-            # clamp to valid range — safety guard
-            hs = min(hs, L - 1)
-            he = min(he, L - 1)
-            sk[b, s_idx]      = (X[b, hs] + X[b, he]) / 2.0
+    for b, spans in enumerate(unique_spans):
+        for s_idx, (s0, e0) in enumerate(spans):
+            s0 = min(s0, L - 1)
+            e0 = min(e0, L - 1)
+            sk[b, s_idx]      = _span_repr(X, b, s0, e0)
             sk_mask[b, s_idx] = 1.0
 
-    return sk, sk_mask, unique_subjects
-# =============== LOSS ================
+    return sk, sk_mask, unique_spans
 
+# =============== LOSS ================
 def masked_bce(pred_logits, gold, mask, pos_weight):
     """Binary cross entropy loss with masking"""
     pw = torch.tensor([pos_weight], device=pred_logits.device)
@@ -327,36 +349,34 @@ def brask_loss(
     L_f_subject = _fwd_head_start_loss + _fwd_head_end_loss
     L_b_subject = _bwd_tail_start_loss + _bwd_tail_end_loss
 
-    sk_mask_exp  = outputs[MODEL_OUTPUT_KEYS["SK_MASK"]].unsqueeze(1).unsqueeze(-1)  # (B, 1, S, 1)
-    tok_mask_exp = token_mask.unsqueeze(1).unsqueeze(2)      # (B, 1, 1, L)
-    mask_4d      = sk_mask_exp * tok_mask_exp                                          # (B, 1, S, L)
-
-    
+    tok_mask_exp  = token_mask.unsqueeze(1).unsqueeze(2)                           # (B, 1, 1, L)
+    fwd_mask_4d   = outputs[MODEL_OUTPUT_KEYS["SK_MASK"]].unsqueeze(1).unsqueeze(-1) * tok_mask_exp   # (B, 1, S_fwd, L)
+    bwd_mask_4d   = outputs["sk_bwd_mask"].unsqueeze(1).unsqueeze(-1)              * tok_mask_exp      # (B, 1, S_bwd, L)
 
     _fwd_tail_start_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["FORWARD_TAIL_START"]],
         gold_labels["fwd_tail_start"],
-        mask_4d,
+        fwd_mask_4d,
         pos_weight_obj
     )
 
     _fwd_tail_end_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["FORWARD_TAIL_END"]],
         gold_labels["fwd_tail_end"],
-        mask_4d,
+        fwd_mask_4d,
         pos_weight_obj
     )
 
     _bwd_head_start_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["BACKWARD_HEAD_START"]],
         gold_labels["bwd_head_start"],
-        mask_4d,
+        bwd_mask_4d,
         pos_weight_obj
     )
     _bwd_head_end_loss = masked_bce_4d(
         outputs[MODEL_OUTPUT_KEYS["BACKWARD_HEAD_END"]],
         gold_labels["bwd_head_end"],
-        mask_4d,
+        bwd_mask_4d,
         pos_weight_obj
     )
     L_f_obj = _fwd_tail_start_loss + _fwd_tail_end_loss
@@ -524,19 +544,19 @@ class BraskModel(torch.nn.Module):
 
         use_gold = (torch.rand(1).item() < teacher_forcing_ratio)
         if use_gold:
-            sk_embs, sk_mask, unique_subjects_batch = build_sk_from_gold(golden_triples, X, mask) #((B, S, H), (B,S))
+            sk_fwd, sk_fwd_mask, unique_subjects_fwd = build_sk_from_gold(golden_triples, X, mask, use_tail=False)
+            sk_bwd, sk_bwd_mask, unique_subjects_bwd = build_sk_from_gold(golden_triples, X, mask, use_tail=True)
         else:
-            sk_embs, sk_mask, unique_subjects_batch = build_sk_prediction(X, mask, fwd_head_start_logits.squeeze(-1), fwd_head_end_logits.squeeze(-1) , self.inference_threshold)
+            sk_fwd, sk_fwd_mask, unique_subjects_fwd = build_sk_prediction(
+                X, mask, fwd_head_start_logits.squeeze(-1), fwd_head_end_logits.squeeze(-1), self.inference_threshold)
+            sk_bwd, sk_bwd_mask, unique_subjects_bwd = build_sk_prediction(
+                X, mask, bwd_tail_start_logits.squeeze(-1), bwd_tail_end_logits.squeeze(-1), self.inference_threshold)
 
+        forward_hijk  = self.fwd_fuse_extractor(X, forward_c,  sk_fwd, sk_fwd_mask)  # (B, R, S_fwd, L, H)
+        backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_bwd, sk_bwd_mask)  # (B, R, S_bwd, L, H)
 
-
-        forward_hijk = self.fwd_fuse_extractor(X, forward_c, sk_embs, sk_mask) # (B, R, max_num_subjects, L, H)
-        backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_embs, sk_mask) # (B, R, max_num_subjects, L, H)
-
-
-        B, R, S, L, H = forward_hijk.shape
-        forward_tails_start_logits, forward_tail_end_logits = self.fwd_tail_predictor(forward_hijk) # (B, R, S, L, 1)
-        backward_head_start_logits, backward_head_end_logits = self.bwd_head_predictor(backward_hijk) # (B, R, S, L, 1)
+        forward_tails_start_logits, forward_tail_end_logits   = self.fwd_tail_predictor(forward_hijk)   # (B, R, S_fwd, L, 1)
+        backward_head_start_logits, backward_head_end_logits  = self.bwd_head_predictor(backward_hijk)  # (B, R, S_bwd, L, 1)
 
         return {
                 MODEL_OUTPUT_KEYS["FORWARD_HEAD_START"]: fwd_head_start_logits.squeeze(-1),
@@ -547,9 +567,12 @@ class BraskModel(torch.nn.Module):
                 MODEL_OUTPUT_KEYS["FORWARD_TAIL_END"]: forward_tail_end_logits.squeeze(-1),
                 MODEL_OUTPUT_KEYS["BACKWARD_HEAD_START"]: backward_head_start_logits.squeeze(-1),
                 MODEL_OUTPUT_KEYS["BACKWARD_HEAD_END"]: backward_head_end_logits.squeeze(-1),
-                MODEL_OUTPUT_KEYS["SK"]: sk_embs,
-                MODEL_OUTPUT_KEYS["SK_MASK"]: sk_mask,
-                MODEL_OUTPUT_KEYS["unique_subjects_batch"]: unique_subjects_batch,
+                MODEL_OUTPUT_KEYS["SK"]: sk_fwd,
+                MODEL_OUTPUT_KEYS["SK_MASK"]: sk_fwd_mask,
+                "sk_bwd": sk_bwd,
+                "sk_bwd_mask": sk_bwd_mask,
+                MODEL_OUTPUT_KEYS["unique_subjects_batch"]: unique_subjects_fwd,
+                "unique_subjects_bwd": unique_subjects_bwd,
         }
 
 
@@ -654,18 +677,19 @@ def run_epoch_stage_2(
             description_mean_embs,
             mask,
             golden_triples,
-            
             teacher_forcing_ratio,
             semantic_rel_emb,
             transe_rel_emb
         )
 
-        unique_subjects_batch = outputs[MODEL_OUTPUT_KEYS["unique_subjects_batch"]]
+        unique_subjects_fwd = outputs[MODEL_OUTPUT_KEYS["unique_subjects_batch"]]
+        unique_subjects_bwd = outputs["unique_subjects_bwd"]
 
         gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
         gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
-            triples_batch= golden_triples,
-            unique_subjects_batch =unique_subjects_batch ,
+            triples_batch=golden_triples,
+            unique_subjects_fwd=unique_subjects_fwd,
+            unique_subjects_bwd=unique_subjects_bwd,
             mask=mask,
             num_relations=num_relations,
             rel2idx=rel2idx
@@ -681,7 +705,6 @@ def run_epoch_stage_2(
             "bwd_head_start": gold_bhs,
             "bwd_head_end": gold_bhe,
         }
-
 
         loss, components = brask_loss(outputs, gold_labels, mask)
         if torch.isnan(loss):
@@ -741,10 +764,10 @@ def evaluate(
                 semantic_rel_emb=semantic_rel_emb,
                 transe_rel_emb=transe_rel_emb
             )
-            unique_subjects_batch = outputs[MODEL_OUTPUT_KEYS["unique_subjects_batch"]]
             gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
-                triples_batch= golden_triples,
-                unique_subjects_batch =unique_subjects_batch ,
+                triples_batch=golden_triples,
+                unique_subjects_fwd=outputs[MODEL_OUTPUT_KEYS["unique_subjects_batch"]],
+                unique_subjects_bwd=outputs["unique_subjects_bwd"],
                 mask=mask,
                 num_relations=num_relations,
                 rel2idx=rel2idx
@@ -764,17 +787,18 @@ def evaluate(
 
 
 def main():
+    import random as _random
+
     batch_size      = 16
     stage1_epochs   = 100
     stage2_epochs   = 100
     stage3_epochs   = 128   # teacher forcing decays over these
     val_split       = 0.1
-
+    early_stop_patience = 10
 
     out_checkpoint_stage1_best  = os.path.join(CHECKPOINTS_DIR, "brask_stage1_best.pt")
     out_checkpoint_stage2_best  = os.path.join(CHECKPOINTS_DIR, "brask_stage2_best.pt")
     out_checkpoint_stage3_best  = os.path.join(CHECKPOINTS_DIR, "brask_stage3_best.pt")
-
 
     rel2idx = data_loader.get_rel2idx(minimized=True)
     description_embs_all, description_embs_ids, description_embs_masks = \
@@ -782,21 +806,24 @@ def main():
     description_embs_mean = data_loader.get_description_embeddings_mean()
     golden_triples        = data_loader.get_golden_triples()
     semantic_rel_emb      = data_loader.get_semantic_relation_embeddings().to(device)  # (R, H)
-    transe_rel_emb        = data_loader.get_trane_relation_embeddings().to(device)    # (R, H)
+    transe_rel_emb        = data_loader.get_trane_relation_embeddings().to(device)     # (R, transe_dim)
 
-    assert semantic_rel_emb.shape[0] == transe_rel_emb.shape[0] == len(rel2idx), f"Number of relations mismatch between semantic and transe embeddings and rel2idx: {semantic_rel_emb.shape[0]} vs {transe_rel_emb.shape[0]} vs {len(rel2idx)}"
+    assert semantic_rel_emb.shape[0] == transe_rel_emb.shape[0] == len(rel2idx), (
+        f"Relations mismatch: semantic {semantic_rel_emb.shape[0]}, "
+        f"transe {transe_rel_emb.shape[0]}, rel2idx {len(rel2idx)}"
+    )
 
     transe_rel_dim = transe_rel_emb.shape[1]
-    num_relations = semantic_rel_emb.shape[0]
+    num_relations  = semantic_rel_emb.shape[0]
+    H              = description_embs_all.shape[2]
 
-    max_length = description_embs_all.shape[1]
-    H          = description_embs_all.shape[2]
-
-
-    N     = len(description_embs_ids)
-    n_val = int(N * val_split)
-    ids_train = description_embs_ids[n_val:]
-    ids_val   = description_embs_ids[:n_val]
+    # Shuffle before splitting to avoid ordering bias (embeddings are sorted by description length)
+    shuffled_ids = list(description_embs_ids)
+    _random.seed(42)
+    _random.shuffle(shuffled_ids)
+    n_val     = int(len(shuffled_ids) * val_split)
+    ids_val   = shuffled_ids[:n_val]
+    ids_train = shuffled_ids[n_val:]
 
     def make_dataset(ids):
         id_to_idx = {id_: i for i, id_ in enumerate(description_embs_ids)}
@@ -818,112 +845,107 @@ def main():
 
     os.makedirs("checkpoints", exist_ok=True)
     torch.save(model.state_dict(), os.path.join(CHECKPOINTS_DIR, "brask_init.pt"))
-    best_val_loss = float("inf")
-
 
     # ════════════════════════════════════════
     # STAGE 1 — Entity extractors only
     # ════════════════════════════════════════
-
-
     print("\n── Stage 1: Entity extractors ──")
     set_stage(model, stage=1)
-    optimizer = get_optimizer(model, stage=1)
+    optimizer     = get_optimizer(model, stage=1)
+    best_val_loss = float("inf")
+    no_improve    = 0
 
     for epoch in range(stage1_epochs):
         train_loss = run_epoch_stage1(model, train_loader, optimizer)
         val_loss   = evaluate(
-                model= model,
-                dataloader = val_loader,
-                rel2idx=rel2idx,
-                num_relations = num_relations,
-                semantic_rel_emb=semantic_rel_emb,
-                transe_rel_emb=transe_rel_emb,
-                stage=1
+            model=model, dataloader=val_loader, rel2idx=rel2idx,
+            num_relations=num_relations, semantic_rel_emb=semantic_rel_emb,
+            transe_rel_emb=transe_rel_emb, stage=1
         )
-
         print(f"  [S1] Epoch {epoch+1}/{stage1_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            no_improve    = 0
             torch.save(model.state_dict(), out_checkpoint_stage1_best)
             print(f"    ✓ Saved (val={best_val_loss:.4f})")
+        else:
+            no_improve += 1
+            if no_improve >= early_stop_patience:
+                print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
+                break
 
-
-        # ════════════════════════════════════════
+    # ════════════════════════════════════════
     # STAGE 2 — Full model, teacher forcing = 1.0
     # ════════════════════════════════════════
     print("\n── Stage 2: Full model (teacher forcing = 1.0) ──")
+    model.load_state_dict(torch.load(out_checkpoint_stage1_best, map_location=device))
     set_stage(model, stage=2)
     optimizer     = get_optimizer(model, stage=2)
     best_val_loss = float("inf")
+    no_improve    = 0
 
     for epoch in range(stage2_epochs):
         train_loss = run_epoch_stage_2(
-            model = model,
-            dataloader = train_loader,
-            optimizer=optimizer,
-            rel2idx=rel2idx,
-            num_relations = num_relations,
-            teacher_forcing_ratio = 1.0,
-            semantic_rel_emb=semantic_rel_emb,
-            transe_rel_emb=transe_rel_emb
+            model=model, dataloader=train_loader, optimizer=optimizer,
+            rel2idx=rel2idx, num_relations=num_relations,
+            teacher_forcing_ratio=1.0,
+            semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb
         )
-        val_loss   = evaluate(
-                model= model,
-                dataloader = val_loader,
-                rel2idx=rel2idx,
-                num_relations = num_relations,
-                semantic_rel_emb=semantic_rel_emb,
-                transe_rel_emb=transe_rel_emb,
-                stage=2
+        val_loss = evaluate(
+            model=model, dataloader=val_loader, rel2idx=rel2idx,
+            num_relations=num_relations, semantic_rel_emb=semantic_rel_emb,
+            transe_rel_emb=transe_rel_emb, stage=2
         )
-
-
         print(f"  [S2] Epoch {epoch+1}/{stage2_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            no_improve    = 0
             torch.save(model.state_dict(), out_checkpoint_stage2_best)
             print(f"    ✓ Saved (val={best_val_loss:.4f})")
+        else:
+            no_improve += 1
+            if no_improve >= early_stop_patience:
+                print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
+                break
 
-
-# ════════════════════════════════════════
+    # ════════════════════════════════════════
     # STAGE 3 — Full model, teacher forcing decays 1.0 → 0.0
     # ════════════════════════════════════════
     print("\n── Stage 3: Full model (teacher forcing decay) ──")
+    model.load_state_dict(torch.load(out_checkpoint_stage2_best, map_location=device))
     set_stage(model, stage=3)
     optimizer     = get_optimizer(model, stage=3)
     best_val_loss = float("inf")
+    no_improve    = 0
 
     for epoch in range(stage3_epochs):
-        tf_ratio = max(0.0, 1.0 - epoch / stage3_epochs)   # linear decay
+        tf_ratio   = max(0.0, 1.0 - epoch / stage3_epochs)
         train_loss = run_epoch_stage_2(
-            model = model,
-            dataloader = train_loader,
-            optimizer=optimizer,
-            rel2idx=rel2idx,
-            num_relations = num_relations,
-            teacher_forcing_ratio = tf_ratio,
-            semantic_rel_emb=semantic_rel_emb,
-            transe_rel_emb=transe_rel_emb
+            model=model, dataloader=train_loader, optimizer=optimizer,
+            rel2idx=rel2idx, num_relations=num_relations,
+            teacher_forcing_ratio=tf_ratio,
+            semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb
         )
         val_loss = evaluate(
-                model= model,
-                dataloader = val_loader,
-                rel2idx=rel2idx,
-                num_relations = num_relations,
-                semantic_rel_emb=semantic_rel_emb,
-                transe_rel_emb=transe_rel_emb,
-                stage=3
+            model=model, dataloader=val_loader, rel2idx=rel2idx,
+            num_relations=num_relations, semantic_rel_emb=semantic_rel_emb,
+            transe_rel_emb=transe_rel_emb, stage=3
         )
         print(f"  [S3] Epoch {epoch+1}/{stage3_epochs}  tf={tf_ratio:.2f} — "
               f"train: {train_loss:.4f}  val: {val_loss:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            no_improve    = 0
             torch.save(model.state_dict(), out_checkpoint_stage3_best)
             print(f"    ✓ Saved (val={best_val_loss:.4f})")
+        else:
+            no_improve += 1
+            if no_improve >= early_stop_patience:
+                print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
+                break
 
     print("\nTraining complete.")
     print(f"Best checkpoints saved in {CHECKPOINTS_DIR}")

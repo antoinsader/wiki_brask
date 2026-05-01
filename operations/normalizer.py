@@ -13,7 +13,8 @@ class Normalizer():
         
 
     def __call__(self, text: str) -> str:
-        """Process a single string. Modular and reusable."""
+        """Replace strange chars, lowercasing(optional), remove extra spaces"""
+        
         for pattern, repl in self.strange_chars:
             text = pattern.sub(repl, text)
 
