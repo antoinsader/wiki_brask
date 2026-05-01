@@ -29,7 +29,7 @@ def read_tensor(path: str, mmap: bool = False) -> torch.Tensor:
         arr = np.load(path, mmap_mode='r')
         return torch.from_numpy(arr)
     else:
-        arr = np.load(path)
+        arr = np.load(path, allow_pickle=True)
         return torch.from_numpy(arr.copy())
 
 def scan_text_file_lines(fp, scan_head_ids= False):
