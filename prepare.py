@@ -1,4 +1,5 @@
 from collections import defaultdict
+import json
 import multiprocessing
 import random
 import torch
@@ -172,7 +173,7 @@ def minimize(minimized_triples_ids: set):
     return True
 
 
-def get_minimized_ids() -> tuple[list, int]:
+def get_minimized_ids() -> tuple[list, int, float]:
     print("Scanning raw files..")
     raw = settings.RAW_FILES
     full_files = settings.PREPROCESSED_FILES
@@ -195,6 +196,12 @@ def get_minimized_ids() -> tuple[list, int]:
     else:
         total_descriptions = scan_text_file_lines(raw.DESCRIPTIONS)
 
+    meta_fp = settings.MINIMIZED_FILES.MINIMIZE_META
+    last_factor = None
+    if os.path.exists(meta_fp):
+        with open(meta_fp) as f:
+            last_factor = json.load(f).get("factor")
+        print(f"\t Last minimization factor: {last_factor}")
 
     print(f"\t Total train triples: {total_train_triples}")
     print(f"\t Total dsecriptions: {total_descriptions}")
@@ -206,10 +213,10 @@ def get_minimized_ids() -> tuple[list, int]:
         answer = input("\n Proceed? [y]/[n] abort / [c] change factor: ").strip().lower()
         if answer == "y":
             break
-        if answer== "n":
+        if answer == "n":
             print("Aborted")
-            return [], 0
-    return all_triples_ids, minimized_n_triples
+            return [], 0, 0.0
+    return all_triples_ids, minimized_n_triples, factor
 
 
 def normalize():
@@ -327,13 +334,24 @@ def embed_descriptions():
 def main():
     answer = timed_input("Do you want to perform minimization on dictionaries? [Y/n]").lower().strip()
     if answer == "y":
-        all_triples_ids, minmized_n_triples = get_minimized_ids()
-        if minmized_n_triples == 0:
+        all_triples_ids, minimized_n_triples, factor = get_minimized_ids()
+        if minimized_n_triples == 0:
             return
 
-        minimized_triples_ids = choose_random_ids(all_triples_ids, minmized_n_triples)
-        minimize(minimized_triples_ids)
-        print("Finished minimization.. ")
+        meta_fp = settings.MINIMIZED_FILES.MINIMIZE_META
+        last_factor = None
+        if os.path.exists(meta_fp):
+            with open(meta_fp) as f:
+                last_factor = json.load(f).get("factor")
+
+        if last_factor == factor and os.path.exists(settings.MINIMIZED_FILES.TRIPLES_TRAIN):
+            print(f"Factor {factor} unchanged — skipping minimization, existing files are up to date.")
+        else:
+            minimized_triples_ids = choose_random_ids(all_triples_ids, minimized_n_triples)
+            minimize(minimized_triples_ids)
+            with open(meta_fp, "w") as f:
+                json.dump({"factor": factor}, f)
+            print("Finished minimization.. ")
     else:
         print("Skipping minimization")
 

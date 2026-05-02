@@ -90,11 +90,12 @@ class _MinimizedFiles:
     DESCRIPTION_EMBEDDINGS_IDS : str = "description_embeddings_ids.pkl"
 
     REL2IDX: str = "rel2idx.pkl"
+    MINIMIZE_META: str = "minimize_meta.json"
 
     def __post_init__(self):
-        for attr in ["ALIASES", 
-                     "RELATIONS", 
-                     "DESCRIPTIONS", 
+        for attr in ["ALIASES",
+                     "RELATIONS",
+                     "DESCRIPTIONS",
                      "TRIPLES_TRAIN",
                      "RELATIONS_EMBEDDINGS",
                      "TRANSE_MODEL_RESULTS",
@@ -104,7 +105,8 @@ class _MinimizedFiles:
                         "DESCRIPTION_EMBEDDING_ALL_MASKS",
                      "DESCRIPTION_EMBEDDINGS_IDS",
                      "GOLD_TRIPLES",
-                     "REL2IDX"]:
+                     "REL2IDX",
+                     "MINIMIZE_META"]:
             filename = getattr(self, attr)
             setattr(self, attr, os.path.join(self.minimized_dir, filename))
 
