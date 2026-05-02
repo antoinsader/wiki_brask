@@ -16,7 +16,7 @@ def read_tensor(path: str, mmap: bool = False) -> torch.Tensor:
         return torch.from_numpy(arr.copy())
 
 ids_all   = read_cached_array("../data/minimized/description_embeddings_ids.pkl")
-mask_all  = read_tensor("../data/minimized/description_embeddings_all_masks.npy")
+mask_all  = read_tensor("../data/minimized/description_embeddings_all_masks.npy", mmap=True)
 golden_triples = read_cached_array("../data/minimized/golden_triples.pkl")
 
 

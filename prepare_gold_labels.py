@@ -252,19 +252,39 @@ def main(use_minimized):
     os.replace(tmp_path, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_ALL)
 
     print(f"Reducing description embeddings mean and masks")
-    description_embeddings_mean = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
-    description_embeddings_masks = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
+    description_embeddings_mean  = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN,          mmap=True)
+    description_embeddings_masks = read_tensor(settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS,      mmap=True)
 
-    description_embeddings_mean_filtered   = description_embeddings_mean[mask]
-    descriptions_embeddings_masks_filtered = description_embeddings_masks[mask]
-    descriptions_embeddings_ids_filtered   = [id_ for id_, m in zip(descriptions_embeddings_ids, mask) if m]
+    H_mean = description_embeddings_mean.shape[1]
+    L_mask = description_embeddings_masks.shape[1]
 
+    # Same chunked-mmap pattern as description_embeddings_all above:
+    # never materialise the full filtered tensor in RAM — write directly to a
+    # tmp file in chunks, then atomically replace the original.
+    tmp_mean_path  = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN          + "_tmp.npy"
+    tmp_masks_path = settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS      + "_tmp.npy"
 
+    mean_new  = init_mmap(tmp_mean_path,  (N_new, H_mean), "float32")
+    masks_new = init_mmap(tmp_masks_path, (N_new, L_mask), "int64")
+
+    for start in range(0, len(src_indices), chunk_size):
+        end      = min(start + chunk_size, len(src_indices))
+        dst_rows = slice(start, end)
+        src_rows = src_indices[start:end]
+        mean_new[dst_rows]  = description_embeddings_mean[src_rows].numpy()
+        masks_new[dst_rows] = description_embeddings_masks[src_rows].numpy()
+
+    mean_new.flush()
+    masks_new.flush()
+    # del before os.replace so the mmap file handles are closed (required on Windows)
+    del mean_new, masks_new, description_embeddings_mean, description_embeddings_masks
+
+    descriptions_embeddings_ids_filtered = [id_ for id_, m in zip(descriptions_embeddings_ids, mask) if m]
 
     print("Saving..")
 
-    save_tensor(description_embeddings_mean_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
-    save_tensor(descriptions_embeddings_masks_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
+    os.replace(tmp_mean_path,  settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_MEAN)
+    os.replace(tmp_masks_path, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDING_ALL_MASKS)
     cache_array(descriptions_embeddings_ids_filtered, settings.MINIMIZED_FILES.DESCRIPTION_EMBEDDINGS_IDS)
 
 

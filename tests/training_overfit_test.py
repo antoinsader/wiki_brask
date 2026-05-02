@@ -44,8 +44,8 @@ description_embs_ids = read_cached_array("../data/minimized/description_embeddin
 golden_triples        = read_cached_array("../data/minimized/golden_triples.pkl")
 
 
-description_embs_masks = read_tensor("../data/minimized/description_embeddings_all_masks.npy")
-description_embs_mean = read_tensor("../data/minimized/description_embeddings_mean.npy")
+description_embs_masks = read_tensor("../data/minimized/description_embeddings_all_masks.npy", mmap=True)
+description_embs_mean  = read_tensor("../data/minimized/description_embeddings_mean.npy",      mmap=True)
 semantic_rel_emb      = read_tensor("../data/minimized/relation_embeddings.npy").to(device)  # (R, H)
 transe_rel_emb      = read_tensor("../data/minimized/transe_rel_embs.npy").to(device)  # (R, E)
 description_embs_all = read_tensor("../data/minimized/description_embeddings_all.npy", mmap=True)

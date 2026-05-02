@@ -1,8 +1,8 @@
+import numpy as np
 import torch
 from tqdm import tqdm
 
-
-from utils.files import save_tensor, init_mmap
+from utils.files import init_mmap
 
 def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cuda, device):
     """Compute one averaged BERT embedding per relation.
@@ -87,64 +87,82 @@ def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cud
 
 
 def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, use_cuda, out_all_embs: str, out_mean_embs: str, out_all_masks: str, max_length: int=256) -> bool:
-    """Embed each sentence using BERT, and save into tensor files(mean_embs: Tensor[N, D], all_embs: Tensor[N, L, D], all_masks: Tensor[N, L] )"""
+    """Embed each sentence using BERT, saving (N,L,H) all_embs, (N,H) mean_embs, (N,L) masks.
 
+    All three outputs are written directly to memory-mapped .npy files so that
+    no full-dataset tensor ever lives in CPU RAM. Pre-tokenizing the entire
+    corpus at once is avoided for the same reason — for millions of sentences
+    the BatchEncoding alone consumes tens of GB of Python objects.
+    The caller is expected to pass sentences already sorted by length so that
+    each batch gets good dynamic padding without sorting here.
+    """
     model = model.to(device)
     model.eval()
-    # 3090 has 24 GB VRAM; 512 fills the GPU without going OOM for BERT-base.
     batch_size = 512 if use_cuda else 32
 
     N = len(sentences)
     H = model.config.hidden_size
 
-    # float16 halves the on-disk size vs float32, preventing bus errors on large N.
-    mm_all_embs = init_mmap(out_all_embs, shape=(N, max_length, H), dtype="float16")
+    autocast_ctx = (
+        torch.amp.autocast(device_type="cuda", dtype=torch.float16)
+        if use_cuda else torch.autocast(device_type="cpu")
+    )
 
-    if use_cuda:
-        autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16)
-    else:
-        autocast_ctx = torch.autocast(device_type="cpu")
+    # ── Step 1: Allocate all outputs as memory-mapped files ───────────────────
+    # Using mmap means each batch is written straight to disk page-by-page.
+    # The alternative — torch.zeros(N, max_length, H) in CPU RAM — would
+    # allocate N×L×H×2 bytes (all_embs) + N×H×4 (mean) + N×L×8 (masks)
+    # upfront, which is tens of GB for a large corpus.
+    mm_all_embs  = init_mmap(out_all_embs,  shape=(N, max_length, H), dtype="float16")
+    mm_mean_embs = init_mmap(out_mean_embs, shape=(N, H),             dtype="float32")
+    mm_all_masks = init_mmap(out_all_masks, shape=(N, max_length),    dtype="int64")
 
-    # Pre-tokenize all sentences without padding. BertTokenizerFast handles
-    # 32K sentences in a few seconds. We then pad each batch to its own max
-    # length (dynamic padding) instead of the global max_length, which can cut
-    # the number of tokens per batch by 5-10× for short descriptions.
-    print("Pre-tokenizing...")
-    all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
-
-    final_mean_embs = torch.zeros(N, H, dtype=torch.float32)
-    final_all_masks = torch.zeros(N, max_length, dtype=torch.int64)
-
+    # ── Step 2: Embed one batch at a time, writing results immediately ────────
+    # We tokenize per batch (not all sentences upfront) for the same reason:
+    # tokenizer(all_sentences, ...) stores every token ID as a Python object,
+    # costing ~28 bytes per token — easily 10-20 GB for a large corpus.
+    # Dynamic padding still works because the caller pre-sorts by length.
     with torch.no_grad():
-        for start in tqdm(range(0, N, batch_size), desc="Embedding sentences"):
+        for batch_num, start in enumerate(tqdm(range(0, N, batch_size), desc="Embedding sentences")):
             end = min(start + batch_size, N)
 
-            # Pad this batch only to its own longest sequence (dynamic padding).
-            batch_enc = {k: all_enc[k][start:end] for k in all_enc}
-            enc = tokenizer.pad(batch_enc, padding=True, return_tensors="pt")
-            input_ids = enc["input_ids"].to(device)
+            enc = tokenizer(
+                sentences[start:end],
+                padding=True,       # pad to this batch's longest sequence only
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+            input_ids      = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
 
             with autocast_ctx:
-                out = model(input_ids=input_ids, attention_mask=attention_mask)
-                embs = out.last_hidden_state  # (B, L, H); L = batch max len ≤ max_length
+                out  = model(input_ids=input_ids, attention_mask=attention_mask)
+                embs = out.last_hidden_state  # (B, L, H), L = this batch's max len
 
             attention_mask_exp = attention_mask.unsqueeze(-1).float()  # (B, L, 1)
-            sum_embs = (embs.float() * attention_mask_exp).sum(dim=1)  # (B, H)
-            token_counts = attention_mask_exp.sum(dim=1).clamp(min=1)  # (B, 1)
-            mean_embs = sum_embs / token_counts  # (B, H)
+            mean_embs = (
+                (embs.float() * attention_mask_exp).sum(dim=1)
+                / attention_mask_exp.sum(dim=1).clamp(min=1)
+            )  # (B, H)
 
             B, L, _ = embs.shape
-            final_mean_embs[start:end] = mean_embs.cpu()
-            mm_all_embs[start:end, :L] = embs.cpu().half().numpy()
-            final_all_masks[start:end, :L] = attention_mask.cpu()
+            mm_all_embs[start:end, :L]  = embs.cpu().half().numpy()
+            mm_mean_embs[start:end]      = mean_embs.cpu().numpy()
+            mm_all_masks[start:end, :L]  = attention_mask.cpu().numpy()
 
+            # Flush dirty mmap pages to disk every 50 batches so the OS page
+            # cache does not silently accumulate gigabytes of unwritten data.
+            if batch_num % 50 == 0:
+                mm_all_embs.flush()
+                mm_mean_embs.flush()
+                mm_all_masks.flush()
+
+    # ── Step 3: Final flush — data is already on disk, nothing to aggregate ──
     mm_all_embs.flush()
-    del mm_all_embs
-
-    save_tensor(final_mean_embs, out_mean_embs)
-    del final_mean_embs
-    save_tensor(final_all_masks, out_all_masks)
+    mm_mean_embs.flush()
+    mm_all_masks.flush()
+    del mm_all_embs, mm_mean_embs, mm_all_masks
 
     return True
 
