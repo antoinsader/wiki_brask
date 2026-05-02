@@ -99,7 +99,10 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     """
     model = model.to(device)
     model.eval()
-    batch_size = 512 if use_cuda else 32
+    # 512 was tuned for a 24 GB 3090. V100-SXM3-32GB has more VRAM and higher
+    # FP16 Tensor Core throughput — 2048 keeps the GPU fed without OOM even at
+    # max_length=256. Reduce if you hit CUDA OOM on shorter-VRAM hardware.
+    batch_size = 2048 if use_cuda else 32
 
     N = len(sentences)
     H = model.config.hidden_size
@@ -124,6 +127,7 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     # each batch only pads to its own longest sequence (dynamic padding), which
     # the caller enables by pre-sorting sentences by text length before passing.
     print("Pre-tokenizing...")
+    #! Here, the all_enc would take big space in cpu ram so if having less cpu memory, we should move the tokenization inside the batches
     all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
 
     # ── Step 3: Embed one batch at a time, writing results immediately ────────
@@ -160,6 +164,11 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
 
             if batch_num % 100 == 0:
                 log_resource_usage(batch_num, use_cuda)
+                if use_cuda:
+                    # Return cached (reserved but unused) VRAM blocks to the
+                    # allocator pool. Dynamic padding creates varying tensor
+                    # shapes each batch, which fragments the cache over time.
+                    torch.cuda.empty_cache()
 
     # ── Step 3: Final flush — data is already on disk, nothing to aggregate ──
     mm_all_embs.flush()
