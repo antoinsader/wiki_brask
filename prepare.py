@@ -123,6 +123,7 @@ def minimize(minimized_triples_ids: set):
     if os.path.exists(min_files.TRIPLES_TRAIN):
         print("minimizing triples: file exists, skipping")
         saved_triples = read_cached_array(min_files.TRIPLES_TRAIN)
+        minimized_triples_ids = set(t[0] for t in saved_triples)
         relation_ids_min = set(t[1] for t in saved_triples)
         tails_entity_ids_min = set(t[2] for t in saved_triples)
         del saved_triples
