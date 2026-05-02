@@ -26,6 +26,27 @@ def parse_args():
     return p.parse_args()
 
 
+def _save_resume(path, model, optimizer, scaler, epoch, best_val_loss, no_improve, done=False):
+    torch.save({
+        "model":         model.state_dict(),
+        "optimizer":     optimizer.state_dict(),
+        "scaler":        scaler.state_dict(),
+        "epoch":         epoch,
+        "best_val_loss": best_val_loss,
+        "no_improve":    no_improve,
+        "done":          done,
+    }, path)
+
+
+def _load_resume(path, model, optimizer, scaler):
+    """Load resume checkpoint in-place. Returns (done, start_epoch, best_val_loss, no_improve)."""
+    ckpt = torch.load(path, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    scaler.load_state_dict(ckpt["scaler"])
+    return ckpt.get("done", False), ckpt["epoch"] + 1, ckpt["best_val_loss"], ckpt["no_improve"]
+
+
 def main():
     args = parse_args()
     batch_size          = args.batch_size
@@ -35,9 +56,8 @@ def main():
     val_split           = args.val_split
     early_stop_patience = args.early_stop_patience
 
-    ckpt_stage1 = os.path.join(CHECKPOINTS_DIR, "brask_stage1_best.pt")
-    ckpt_stage2 = os.path.join(CHECKPOINTS_DIR, "brask_stage2_best.pt")
-    ckpt_stage3 = os.path.join(CHECKPOINTS_DIR, "brask_stage3_best.pt")
+    ckpt_best   = {s: os.path.join(CHECKPOINTS_DIR, f"brask_stage{s}_best.pt")   for s in (1, 2, 3)}
+    ckpt_resume = {s: os.path.join(CHECKPOINTS_DIR, f"brask_stage{s}_resume.pt") for s in (1, 2, 3)}
 
     rel2idx          = data_loader.get_rel2idx(minimized=True)
     embs_all, emb_ids, embs_masks = data_loader.get_description_embeddings_all()
@@ -88,7 +108,8 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
     os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(CHECKPOINTS_DIR, "brask_init.pt"))
+    if not os.path.exists(os.path.join(CHECKPOINTS_DIR, "brask_init.pt")):
+        torch.save(model.state_dict(), os.path.join(CHECKPOINTS_DIR, "brask_init.pt"))
 
     # ════════════════════════════════════════
     # STAGE 1 — Entity extractors only
@@ -98,82 +119,138 @@ def main():
     optimizer     = get_optimizer(model, stage=1)
     best_val_loss = float("inf")
     no_improve    = 0
+    start_epoch   = 0
 
-    for epoch in range(stage1_epochs):
-        train_loss = run_epoch_stage1(model, train_loader, optimizer, scaler)
-        val_loss   = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=1)
-        print(f"  [S1] Epoch {epoch+1}/{stage1_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            no_improve    = 0
-            torch.save(model.state_dict(), ckpt_stage1)
-            print(f"    ✓ Saved (val={best_val_loss:.4f})")
+    if os.path.exists(ckpt_resume[1]):
+        done, start_epoch, best_val_loss, no_improve = _load_resume(
+            ckpt_resume[1], model, optimizer, scaler
+        )
+        if done:
+            print(f"  Stage 1 already complete — loading best checkpoint.")
+            model.load_state_dict(torch.load(ckpt_best[1], map_location=device))
         else:
-            no_improve += 1
-            if no_improve >= early_stop_patience:
+            print(f"  Resuming Stage 1 from epoch {start_epoch} (best_val={best_val_loss:.4f})")
+    else:
+        done = False
+
+    if not done:
+        for epoch in range(start_epoch, stage1_epochs):
+            train_loss = run_epoch_stage1(model, train_loader, optimizer, scaler)
+            val_loss   = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=1)
+            print(f"  [S1] Epoch {epoch+1}/{stage1_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                no_improve    = 0
+                torch.save(model.state_dict(), ckpt_best[1])
+                print(f"    ✓ Saved best (val={best_val_loss:.4f})")
+            else:
+                no_improve += 1
+
+            early_stopped = no_improve >= early_stop_patience
+            _save_resume(ckpt_resume[1], model, optimizer, scaler, epoch, best_val_loss, no_improve,
+                         done=(epoch == stage1_epochs - 1 or early_stopped))
+            if early_stopped:
                 print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
                 break
+
+        model.load_state_dict(torch.load(ckpt_best[1], map_location=device))
 
     # ════════════════════════════════════════
     # STAGE 2 — Full model, teacher forcing = 1.0
     # ════════════════════════════════════════
     print("\n── Stage 2: Full model (teacher forcing = 1.0) ──")
-    model.load_state_dict(torch.load(ckpt_stage1, map_location=device))
     set_stage(model, stage=2)
     optimizer     = get_optimizer(model, stage=2)
     best_val_loss = float("inf")
     no_improve    = 0
+    start_epoch   = 0
 
-    for epoch in range(stage2_epochs):
-        train_loss = run_epoch_stage_2(
-            model, train_loader, optimizer, scaler, rel2idx, all_rel_ids,
-            teacher_forcing_ratio=1.0,
-            semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb,
+    if os.path.exists(ckpt_resume[2]):
+        done, start_epoch, best_val_loss, no_improve = _load_resume(
+            ckpt_resume[2], model, optimizer, scaler
         )
-        val_loss = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=2)
-        print(f"  [S2] Epoch {epoch+1}/{stage2_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            no_improve    = 0
-            torch.save(model.state_dict(), ckpt_stage2)
-            print(f"    ✓ Saved (val={best_val_loss:.4f})")
+        if done:
+            print(f"  Stage 2 already complete — loading best checkpoint.")
+            model.load_state_dict(torch.load(ckpt_best[2], map_location=device))
         else:
-            no_improve += 1
-            if no_improve >= early_stop_patience:
+            print(f"  Resuming Stage 2 from epoch {start_epoch} (best_val={best_val_loss:.4f})")
+    else:
+        done = False
+
+    if not done:
+        for epoch in range(start_epoch, stage2_epochs):
+            train_loss = run_epoch_stage_2(
+                model, train_loader, optimizer, scaler, rel2idx, all_rel_ids,
+                teacher_forcing_ratio=1.0,
+                semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb,
+            )
+            val_loss = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=2)
+            print(f"  [S2] Epoch {epoch+1}/{stage2_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                no_improve    = 0
+                torch.save(model.state_dict(), ckpt_best[2])
+                print(f"    ✓ Saved best (val={best_val_loss:.4f})")
+            else:
+                no_improve += 1
+
+            early_stopped = no_improve >= early_stop_patience
+            _save_resume(ckpt_resume[2], model, optimizer, scaler, epoch, best_val_loss, no_improve,
+                         done=(epoch == stage2_epochs - 1 or early_stopped))
+            if early_stopped:
                 print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
                 break
+
+        model.load_state_dict(torch.load(ckpt_best[2], map_location=device))
 
     # ════════════════════════════════════════
     # STAGE 3 — Full model, teacher forcing decays 1.0 → 0.0
     # ════════════════════════════════════════
     print("\n── Stage 3: Full model (teacher forcing decay) ──")
-    model.load_state_dict(torch.load(ckpt_stage2, map_location=device))
     set_stage(model, stage=3)
     optimizer     = get_optimizer(model, stage=3)
     best_val_loss = float("inf")
     no_improve    = 0
+    start_epoch   = 0
 
-    for epoch in range(stage3_epochs):
-        tf_ratio   = max(0.0, 1.0 - epoch / stage3_epochs)
-        train_loss = run_epoch_stage_2(
-            model, train_loader, optimizer, scaler, rel2idx, all_rel_ids,
-            teacher_forcing_ratio=tf_ratio,
-            semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb,
+    if os.path.exists(ckpt_resume[3]):
+        done, start_epoch, best_val_loss, no_improve = _load_resume(
+            ckpt_resume[3], model, optimizer, scaler
         )
-        val_loss = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=3)
-        print(f"  [S3] Epoch {epoch+1}/{stage3_epochs}  tf={tf_ratio:.2f} — "
-              f"train: {train_loss:.4f}  val: {val_loss:.4f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            no_improve    = 0
-            torch.save(model.state_dict(), ckpt_stage3)
-            print(f"    ✓ Saved (val={best_val_loss:.4f})")
+        if done:
+            print(f"  Stage 3 already complete — loading best checkpoint.")
+            model.load_state_dict(torch.load(ckpt_best[3], map_location=device))
         else:
-            no_improve += 1
-            if no_improve >= early_stop_patience:
+            print(f"  Resuming Stage 3 from epoch {start_epoch} (best_val={best_val_loss:.4f})")
+    else:
+        done = False
+
+    if not done:
+        for epoch in range(start_epoch, stage3_epochs):
+            tf_ratio   = max(0.0, 1.0 - epoch / stage3_epochs)
+            train_loss = run_epoch_stage_2(
+                model, train_loader, optimizer, scaler, rel2idx, all_rel_ids,
+                teacher_forcing_ratio=tf_ratio,
+                semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb,
+            )
+            val_loss = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=3)
+            print(f"  [S3] Epoch {epoch+1}/{stage3_epochs}  tf={tf_ratio:.2f} — "
+                  f"train: {train_loss:.4f}  val: {val_loss:.4f}")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                no_improve    = 0
+                torch.save(model.state_dict(), ckpt_best[3])
+                print(f"    ✓ Saved best (val={best_val_loss:.4f})")
+            else:
+                no_improve += 1
+
+            early_stopped = no_improve >= early_stop_patience
+            _save_resume(ckpt_resume[3], model, optimizer, scaler, epoch, best_val_loss, no_improve,
+                         done=(epoch == stage3_epochs - 1 or early_stopped))
+            if early_stopped:
                 print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
                 break
 
