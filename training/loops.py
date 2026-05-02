@@ -10,6 +10,7 @@ from training.config import (
     LEARNING_RATE_STAGE_2,
     MODEL_OUTPUT_KEYS,
     device,
+    use_cuda,
 )
 from training.dataset import BraskDataset
 from training.labels import build_gold_entity_labels, build_gold_tail_labels, sample_active_relations
@@ -37,7 +38,7 @@ def get_optimizer(model: BraskModel, stage: int) -> torch.optim.Optimizer:
     return torch.optim.Adam(trainable, lr=lr)
 
 
-def run_epoch_stage1(model: BraskModel, dataloader, optimizer) -> float:
+def run_epoch_stage1(model: BraskModel, dataloader, optimizer, scaler) -> float:
     K = BraskDataset.BATCH_KEYS
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -49,28 +50,31 @@ def run_epoch_stage1(model: BraskModel, dataloader, optimizer) -> float:
 
         gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
 
-        fwd_start, fwd_end = model.fwd_head_predictor(X)
-        bwd_start, bwd_end = model.bwd_tail_predictor(X)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast("cuda", enabled=use_cuda):
+            fwd_start, fwd_end = model.fwd_head_predictor(X)
+            bwd_start, bwd_end = model.bwd_tail_predictor(X)
+            loss = stage1_loss(
+                fwd_head_start_logits=fwd_start.squeeze(-1),
+                fwd_head_end_logits=fwd_end.squeeze(-1),
+                bwd_tail_start_logits=bwd_start.squeeze(-1),
+                bwd_tail_end_logits=bwd_end.squeeze(-1),
+                golden_head_start_labels=gold_fhs,
+                golden_head_end_labels=gold_fhe,
+                golden_tail_start_labels=gold_bts,
+                golden_tail_end_labels=gold_bte,
+                token_mask=mask,
+            )
 
-        loss = stage1_loss(
-            fwd_head_start_logits=fwd_start.squeeze(-1),
-            fwd_head_end_logits=fwd_end.squeeze(-1),
-            bwd_tail_start_logits=bwd_start.squeeze(-1),
-            bwd_tail_end_logits=bwd_end.squeeze(-1),
-            golden_head_start_labels=gold_fhs,
-            golden_head_end_labels=gold_fhe,
-            golden_tail_start_labels=gold_bts,
-            golden_tail_end_labels=gold_bte,
-            token_mask=mask,
-        )
         if torch.isnan(loss):
             print("  NaN loss detected — stopping")
             break
 
-        optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
         n_batches  += 1
@@ -82,6 +86,7 @@ def run_epoch_stage_2(
     model: BraskModel,
     dataloader,
     optimizer,
+    scaler,
     rel2idx: dict,
     all_rel_ids: list,
     teacher_forcing_ratio: float,
@@ -104,33 +109,36 @@ def run_epoch_stage_2(
         active_transe   = transe_rel_emb[active_indices.to(device)]
         num_active      = len(active_indices)
 
-        outputs = model(X, X_mean, mask, golden_triples, teacher_forcing_ratio, active_semantic, active_transe)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast("cuda", enabled=use_cuda):
+            outputs = model(X, X_mean, mask, golden_triples, teacher_forcing_ratio, active_semantic, active_transe)
 
-        gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
-        gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
-            triples_batch=golden_triples,
-            unique_subjects_fwd=outputs[MOK["unique_subjects_batch"]],
-            unique_subjects_bwd=outputs["unique_subjects_bwd"],
-            mask=mask,
-            num_relations=num_active,
-            rel2idx=rel_to_slot,
-        )
-        gold_labels = {
-            "fwd_head_start": gold_fhs, "fwd_head_end": gold_fhe,
-            "bwd_tail_start": gold_bts, "bwd_tail_end": gold_bte,
-            "fwd_tail_start": gold_fts, "fwd_tail_end": gold_fte,
-            "bwd_head_start": gold_bhs, "bwd_head_end": gold_bhe,
-        }
+            gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
+            gold_fts, gold_fte, gold_bhs, gold_bhe = build_gold_tail_labels(
+                triples_batch=golden_triples,
+                unique_subjects_fwd=outputs[MOK["unique_subjects_batch"]],
+                unique_subjects_bwd=outputs["unique_subjects_bwd"],
+                mask=mask,
+                num_relations=num_active,
+                rel2idx=rel_to_slot,
+            )
+            gold_labels = {
+                "fwd_head_start": gold_fhs, "fwd_head_end": gold_fhe,
+                "bwd_tail_start": gold_bts, "bwd_tail_end": gold_bte,
+                "fwd_tail_start": gold_fts, "fwd_tail_end": gold_fte,
+                "bwd_head_start": gold_bhs, "bwd_head_end": gold_bhe,
+            }
+            loss, components = brask_loss(outputs, gold_labels, mask)
 
-        loss, components = brask_loss(outputs, gold_labels, mask)
         if torch.isnan(loss):
             print("  NaN loss detected — stopping")
             break
 
-        optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
         n_batches  += 1

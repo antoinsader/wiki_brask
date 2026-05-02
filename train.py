@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from models.BraskModel import BraskModel
 from training.config import (
     BATCH_SIZE, CHECKPOINTS_DIR, EARLY_STOP_PATIENCE,
-    NUM_WORKERS, STAGE1_EPOCHS, STAGE2_EPOCHS, STAGE3_EPOCHS, VAL_SPLIT, device,
+    NUM_WORKERS, STAGE1_EPOCHS, STAGE2_EPOCHS, STAGE3_EPOCHS, VAL_SPLIT, device, use_cuda,
 )
 from training.dataset import BraskDataset, collate_fn
 from training.loops import evaluate, get_optimizer, run_epoch_stage1, run_epoch_stage_2, set_stage
@@ -84,7 +84,8 @@ def main():
         shuffle=False, collate_fn=collate_fn, num_workers=NUM_WORKERS,
     )
 
-    model = BraskModel(hidden_dim=H, transe_rel_dim=transe_rel_dim).to(device)
+    model  = BraskModel(hidden_dim=H, transe_rel_dim=transe_rel_dim).to(device)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
     os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(CHECKPOINTS_DIR, "brask_init.pt"))
@@ -99,7 +100,7 @@ def main():
     no_improve    = 0
 
     for epoch in range(stage1_epochs):
-        train_loss = run_epoch_stage1(model, train_loader, optimizer)
+        train_loss = run_epoch_stage1(model, train_loader, optimizer, scaler)
         val_loss   = evaluate(model, val_loader, rel2idx, all_rel_ids, semantic_rel_emb, transe_rel_emb, stage=1)
         print(f"  [S1] Epoch {epoch+1}/{stage1_epochs} — train: {train_loss:.4f}  val: {val_loss:.4f}")
 
@@ -126,7 +127,7 @@ def main():
 
     for epoch in range(stage2_epochs):
         train_loss = run_epoch_stage_2(
-            model, train_loader, optimizer, rel2idx, all_rel_ids,
+            model, train_loader, optimizer, scaler, rel2idx, all_rel_ids,
             teacher_forcing_ratio=1.0,
             semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb,
         )
@@ -157,7 +158,7 @@ def main():
     for epoch in range(stage3_epochs):
         tf_ratio   = max(0.0, 1.0 - epoch / stage3_epochs)
         train_loss = run_epoch_stage_2(
-            model, train_loader, optimizer, rel2idx, all_rel_ids,
+            model, train_loader, optimizer, scaler, rel2idx, all_rel_ids,
             teacher_forcing_ratio=tf_ratio,
             semantic_rel_emb=semantic_rel_emb, transe_rel_emb=transe_rel_emb,
         )
