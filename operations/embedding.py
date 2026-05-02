@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from helpers.resource_monitor import log_resource_usage
+from helpers.resources import log_resource_usage, drop_mmap_pages
 from utils.files import init_mmap
 
 def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cuda, device):
@@ -112,7 +112,7 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
         if use_cuda else torch.autocast(device_type="cpu")
     )
 
-    # ── Step 1: Allocate all outputs as memory-mapped files ───────────────────
+    # Step 1: Allocate all outputs as memory-mapped files ───────────────────
     # Using mmap means each batch is written straight to disk page-by-page.
     # The alternative — torch.zeros(N, max_length, H) in CPU RAM — would
     # allocate N×L×H×2 bytes (all_embs) + N×H×4 (mean) + N×L×8 (masks)
@@ -121,7 +121,7 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     mm_mean_embs = init_mmap(out_mean_embs, shape=(N, H),             dtype="float32")
     mm_all_masks = init_mmap(out_all_masks, shape=(N, max_length),    dtype="int64")
 
-    # ── Step 2: Pre-tokenize all sentences (no padding yet) ───────────────────
+    # Step 2: Pre-tokenize all sentences (no padding yet) ───────────────────
     # BertTokenizerFast processes the full corpus in seconds. Storing token IDs
     # without padding keeps this structure small. We pad per-batch in step 3 so
     # each batch only pads to its own longest sequence (dynamic padding), which
@@ -130,7 +130,6 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     #! Here, the all_enc would take big space in cpu ram so if having less cpu memory, we should move the tokenization inside the batches
     all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
 
-    # ── Step 3: Embed one batch at a time, writing results immediately ────────
     with torch.no_grad():
         for batch_num, start in enumerate(tqdm(range(0, N, batch_size), desc="Embedding sentences")):
             end = min(start + batch_size, N)
@@ -157,20 +156,21 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
 
             # Flush dirty mmap pages to disk every 50 batches so the OS page
             # cache does not silently accumulate gigabytes of unwritten data.
-            if batch_num % 50 == 0:
-                mm_all_embs.flush()
-                mm_mean_embs.flush()
-                mm_all_masks.flush()
+            mm_all_embs.flush()
+            mm_mean_embs.flush()
+            mm_all_masks.flush()
+            #! Works only on linux
+            drop_mmap_pages(mm_all_embs,  start, end)
+            drop_mmap_pages(mm_mean_embs, start, end)
+            drop_mmap_pages(mm_all_masks, start, end)
 
-            if batch_num % 100 == 0:
-                log_resource_usage(batch_num, use_cuda)
-                if use_cuda:
-                    # Return cached (reserved but unused) VRAM blocks to the
-                    # allocator pool. Dynamic padding creates varying tensor
-                    # shapes each batch, which fragments the cache over time.
-                    torch.cuda.empty_cache()
 
-    # ── Step 3: Final flush — data is already on disk, nothing to aggregate ──
+            if use_cuda:
+                torch.cuda.empty_cache()
+        if batch_num % 100 == 0:
+            log_resource_usage(batch_num, use_cuda)
+
+
     mm_all_embs.flush()
     mm_mean_embs.flush()
     mm_all_masks.flush()
