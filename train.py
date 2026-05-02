@@ -1,3 +1,4 @@
+import argparse
 import os
 import random
 
@@ -5,19 +6,34 @@ import torch
 from torch.utils.data import DataLoader
 
 from models.BraskModel import BraskModel
-from training.config import CHECKPOINTS_DIR, NUM_WORKERS, device
+from training.config import (
+    BATCH_SIZE, CHECKPOINTS_DIR, EARLY_STOP_PATIENCE,
+    NUM_WORKERS, STAGE1_EPOCHS, STAGE2_EPOCHS, STAGE3_EPOCHS, VAL_SPLIT, device,
+)
 from training.dataset import BraskDataset, collate_fn
 from training.loops import evaluate, get_optimizer, run_epoch_stage1, run_epoch_stage_2, set_stage
 from utils.pre_processed_data import data_loader
 
 
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--batch-size",          type=int,   default=BATCH_SIZE)
+    p.add_argument("--stage1-epochs",       type=int,   default=STAGE1_EPOCHS)
+    p.add_argument("--stage2-epochs",       type=int,   default=STAGE2_EPOCHS)
+    p.add_argument("--stage3-epochs",       type=int,   default=STAGE3_EPOCHS)
+    p.add_argument("--val-split",           type=float, default=VAL_SPLIT)
+    p.add_argument("--early-stop-patience", type=int,   default=EARLY_STOP_PATIENCE)
+    return p.parse_args()
+
+
 def main():
-    batch_size          = 16
-    stage1_epochs       = 100
-    stage2_epochs       = 100
-    stage3_epochs       = 128
-    val_split           = 0.1
-    early_stop_patience = 10
+    args = parse_args()
+    batch_size          = args.batch_size
+    stage1_epochs       = args.stage1_epochs
+    stage2_epochs       = args.stage2_epochs
+    stage3_epochs       = args.stage3_epochs
+    val_split           = args.val_split
+    early_stop_patience = args.early_stop_patience
 
     ckpt_stage1 = os.path.join(CHECKPOINTS_DIR, "brask_stage1_best.pt")
     ckpt_stage2 = os.path.join(CHECKPOINTS_DIR, "brask_stage2_best.pt")

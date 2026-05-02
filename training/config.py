@@ -9,6 +9,13 @@ CHECKPOINTS_DIR = "checkpoints/"
 LEARNING_RATE_STAGE_1 = 1e-4
 LEARNING_RATE_STAGE_2 = 1e-5
 
+BATCH_SIZE           = 8
+STAGE1_EPOCHS        = 100
+STAGE2_EPOCHS        = 100
+STAGE3_EPOCHS        = 128
+VAL_SPLIT            = 0.1
+EARLY_STOP_PATIENCE  = 10
+
 # Tune if model predicts all zeros (increase) or all ones (decrease)
 POS_WEIGHT_ENTITY = 7.9
 POS_WEIGHT_OBJ    = 7.9
