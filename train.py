@@ -5,6 +5,7 @@ import random
 import torch
 from torch.utils.data import DataLoader
 
+from logging.experiment_logger import ExperimentLogger
 from models.BraskModel import BraskModel
 from training.config import (
     BATCH_SIZE, CHECKPOINTS_DIR, EARLY_STOP_PATIENCE_STAGES,
@@ -89,6 +90,15 @@ def main():
 
     id_to_idx = {id_: i for i, id_ in enumerate(emb_ids)}
 
+    logger = ExperimentLogger(vars(args))
+    logger.log_dataset_stats(
+        n_train_descriptions=len(ids_train),
+        n_val_descriptions=len(ids_val),
+        n_train_triples=sum(len(golden_triples.get(i, [])) for i in ids_train),
+        n_val_triples=sum(len(golden_triples.get(i, [])) for i in ids_val),
+        n_relations=len(rel2idx),
+    )
+
     def make_dataset(ids):
         idx = [id_to_idx[i] for i in ids]
         return BraskDataset(
@@ -132,8 +142,10 @@ def main():
         if done:
             print(f"  Stage 1 already complete — loading best checkpoint.")
             model.load_state_dict(torch.load(ckpt_best[1], map_location=device))
+            logger.log_stage_end(1, "already_done")
         else:
             print(f"  Resuming Stage 1 from epoch {start_epoch} (best_val={best_val_loss:.4f})")
+            logger.log_resume(1, start_epoch, best_val_loss)
     else:
         done = False
 
@@ -152,11 +164,15 @@ def main():
                 no_improve += 1
 
             early_stopped = no_improve >= early_stop_patience_stage_1
+            logger.log_epoch(1, epoch + 1, train_loss, val_loss, is_new_best=(no_improve == 0))
             _save_resume(ckpt_resume[1], model, optimizer, scaler, epoch, best_val_loss, no_improve,
                          done=(epoch == stage1_epochs - 1 or early_stopped))
             if early_stopped:
                 print(f"  Early stopping after {early_stop_patience_stage_1} epochs without improvement.")
+                logger.log_stage_end(1, "early_stop")
                 break
+        else:
+            logger.log_stage_end(1, "completed")
 
         model.load_state_dict(torch.load(ckpt_best[1], map_location=device))
 
@@ -177,8 +193,10 @@ def main():
         if done:
             print(f"  Stage 2 already complete — loading best checkpoint.")
             model.load_state_dict(torch.load(ckpt_best[2], map_location=device))
+            logger.log_stage_end(2, "already_done")
         else:
             print(f"  Resuming Stage 2 from epoch {start_epoch} (best_val={best_val_loss:.4f})")
+            logger.log_resume(2, start_epoch, best_val_loss)
     else:
         done = False
 
@@ -201,11 +219,15 @@ def main():
                 no_improve += 1
 
             early_stopped = no_improve >= early_stop_patience_stage_2
+            logger.log_epoch(2, epoch + 1, train_loss, val_loss, is_new_best=(no_improve == 0))
             _save_resume(ckpt_resume[2], model, optimizer, scaler, epoch, best_val_loss, no_improve,
                          done=(epoch == stage2_epochs - 1 or early_stopped))
             if early_stopped:
                 print(f"  Early stopping after {early_stop_patience_stage_2} epochs without improvement.")
+                logger.log_stage_end(2, "early_stop")
                 break
+        else:
+            logger.log_stage_end(2, "completed")
 
         model.load_state_dict(torch.load(ckpt_best[2], map_location=device))
 
@@ -226,8 +248,10 @@ def main():
         if done:
             print(f"  Stage 3 already complete — loading best checkpoint.")
             model.load_state_dict(torch.load(ckpt_best[3], map_location=device))
+            logger.log_stage_end(3, "already_done")
         else:
             print(f"  Resuming Stage 3 from epoch {start_epoch} (best_val={best_val_loss:.4f})")
+            logger.log_resume(3, start_epoch, best_val_loss)
     else:
         done = False
 
@@ -252,12 +276,17 @@ def main():
                 no_improve += 1
 
             early_stopped = no_improve >= early_stop_patience_stage_3
+            logger.log_epoch(3, epoch + 1, train_loss, val_loss, is_new_best=(no_improve == 0))
             _save_resume(ckpt_resume[3], model, optimizer, scaler, epoch, best_val_loss, no_improve,
                          done=(epoch == stage3_epochs - 1 or early_stopped))
             if early_stopped:
                 print(f"  Early stopping after {early_stop_patience_stage_3} epochs without improvement.")
+                logger.log_stage_end(3, "early_stop")
                 break
+        else:
+            logger.log_stage_end(3, "completed")
 
+    logger.finish()
     print("\nTraining complete.")
     print(f"Best checkpoints saved in {CHECKPOINTS_DIR}")
 
