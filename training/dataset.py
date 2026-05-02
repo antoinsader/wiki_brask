@@ -33,9 +33,9 @@ class BraskDataset(Dataset):
     def __getitem__(self, idx):
         entity_id = self.ids[idx]
         return {
-            self.BATCH_KEYS["EMBS"]:           torch.tensor(self.embs[idx],       dtype=torch.float32),
-            self.BATCH_KEYS["EMBS_MASKS"]:     torch.tensor(self.embs_masks[idx], dtype=torch.float32),
-            self.BATCH_KEYS["MEAN_EMBS"]:      torch.tensor(self.mean_embs[idx],  dtype=torch.float32),
+            self.BATCH_KEYS["EMBS"]:           self.embs[idx].to(dtype=torch.float32),
+            self.BATCH_KEYS["EMBS_MASKS"]:     self.embs_masks[idx].to(dtype=torch.float32),
+            self.BATCH_KEYS["MEAN_EMBS"]:      self.mean_embs[idx].to(dtype=torch.float32),
             self.BATCH_KEYS["GOLDEN_TRIPLES"]: self.golden_triples.get(entity_id, []),
             self.BATCH_KEYS["ENTITY_ID"]:      entity_id,
         }
