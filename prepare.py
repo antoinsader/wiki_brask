@@ -115,16 +115,24 @@ def minimmizing_triples(minimized_triples_ids, raw_fp, min_files):
     del triples_min
     return relation_ids_min, tails_entity_ids_min
 
+#? TODO: needs to be tracked with the factor and for other minmizations than triples minmization
 def minimize(minimized_triples_ids: set):
 
     min_files = settings.MINIMIZED_FILES
     raw_fp = settings.RAW_FILES.TRIPLES_TRAIN
-    print("minimizing triples")
-    relation_ids_min, tails_entity_ids_min = minimmizing_triples(
-        minimized_triples_ids,
-        raw_fp=raw_fp,
-        min_files=min_files
-    )
+    if os.path.exists(min_files.TRIPLES_TRAIN):
+        print("minimizing triples: file exists, skipping")
+        saved_triples = read_cached_array(min_files.TRIPLES_TRAIN)
+        relation_ids_min = set(t[1] for t in saved_triples)
+        tails_entity_ids_min = set(t[2] for t in saved_triples)
+        del saved_triples
+    else:
+        print("minimizing triples")
+        relation_ids_min, tails_entity_ids_min = minimmizing_triples(
+            minimized_triples_ids,
+            raw_fp=raw_fp,
+            min_files=min_files
+        )
 
 
 
@@ -159,10 +167,6 @@ def minimize(minimized_triples_ids: set):
     cache_array(descriptions_min, min_files.DESCRIPTIONS)
     print(f"\t Descriptions minimization finished  : {len(descriptions_min):,} -> {min_files.DESCRIPTIONS}")
     del descriptions_all, descriptions_min
-
-
-
-
 
     return True
 
