@@ -6,6 +6,7 @@ from tqdm import tqdm
 from models.BraskModel import BraskModel
 from training.config import (
     CHECKPOINTS_DIR,
+    GRAD_ACCUM_STEPS,
     LEARNING_RATE_STAGE_1,
     LEARNING_RATE_STAGE_2,
     MODEL_OUTPUT_KEYS,
@@ -38,19 +39,20 @@ def get_optimizer(model: BraskModel, stage: int) -> torch.optim.Optimizer:
     return torch.optim.Adam(trainable, lr=lr)
 
 
-def run_epoch_stage1(model: BraskModel, dataloader, optimizer, scaler) -> float:
+def run_epoch_stage1(model: BraskModel, dataloader, optimizer, scaler,
+                     grad_accum_steps: int = GRAD_ACCUM_STEPS) -> float:
     K = BraskDataset.BATCH_KEYS
     model.train()
     total_loss, n_batches = 0.0, 0
+    optimizer.zero_grad(set_to_none=True)
 
-    for batch in tqdm(dataloader, desc="Stage 1 epoch"):
+    for step, batch in enumerate(tqdm(dataloader, desc="Stage 1 epoch")):
         X              = batch[K["EMBS"]].to(device)
         mask           = batch[K["EMBS_MASKS"]].to(device)
         golden_triples = batch[K["GOLDEN_TRIPLES"]]
 
         gold_fhs, gold_fhe, gold_bts, gold_bte = build_gold_entity_labels(golden_triples, mask)
 
-        optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=use_cuda):
             fwd_start, fwd_end = model.fwd_head_predictor(X)
             bwd_start, bwd_end = model.bwd_tail_predictor(X)
@@ -65,19 +67,30 @@ def run_epoch_stage1(model: BraskModel, dataloader, optimizer, scaler) -> float:
                 golden_tail_end_labels=gold_bte,
                 token_mask=mask,
             )
+            loss = loss / grad_accum_steps
 
         if torch.isnan(loss):
             print("  NaN loss detected — stopping")
             break
 
         scaler.scale(loss).backward()
+        total_loss += loss.item() * grad_accum_steps
+        n_batches  += 1
+
+        if (step + 1) % grad_accum_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+    # flush any remaining accumulated gradients
+    if n_batches % grad_accum_steps != 0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
-
-        total_loss += loss.item()
-        n_batches  += 1
+        optimizer.zero_grad(set_to_none=True)
 
     return total_loss / (n_batches + 1e-8)
 
@@ -92,13 +105,15 @@ def run_epoch_stage_2(
     teacher_forcing_ratio: float,
     semantic_rel_emb: torch.Tensor,
     transe_rel_emb: torch.Tensor,
+    grad_accum_steps: int = GRAD_ACCUM_STEPS,
 ) -> float:
     K   = BraskDataset.BATCH_KEYS
     MOK = MODEL_OUTPUT_KEYS
     model.train()
     total_loss, n_batches = 0.0, 0
+    optimizer.zero_grad(set_to_none=True)
 
-    for batch in tqdm(dataloader, desc=f"Stage 2 (tf={teacher_forcing_ratio:.2f})"):
+    for step, batch in enumerate(tqdm(dataloader, desc=f"Stage 2 (tf={teacher_forcing_ratio:.2f})")):
         X              = batch[K["EMBS"]].to(device)
         X_mean         = batch[K["MEAN_EMBS"]].to(device)
         mask           = batch[K["EMBS_MASKS"]].to(device)
@@ -109,7 +124,6 @@ def run_epoch_stage_2(
         active_transe   = transe_rel_emb[active_indices.to(device)]
         num_active      = len(active_indices)
 
-        optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=use_cuda):
             outputs = model(X, X_mean, mask, golden_triples, teacher_forcing_ratio, active_semantic, active_transe)
 
@@ -129,21 +143,33 @@ def run_epoch_stage_2(
                 "bwd_head_start": gold_bhs, "bwd_head_end": gold_bhe,
             }
             loss, components = brask_loss(outputs, gold_labels, mask)
+            loss = loss / grad_accum_steps
 
         if torch.isnan(loss):
             print("  NaN loss detected — stopping")
             break
 
         scaler.scale(loss).backward()
+        total_loss += loss.item() * grad_accum_steps
+        n_batches  += 1
+
+        if (step + 1) % grad_accum_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+        if n_batches % 100 == 0:
+            print(f"\t\t batch {n_batches}: {components}")
+
+    # flush any remaining accumulated gradients
+    if n_batches % grad_accum_steps != 0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         scaler.step(optimizer)
         scaler.update()
-
-        total_loss += loss.item()
-        n_batches  += 1
-        if n_batches % 100 == 0:
-            print(f"\t\t batch {n_batches}: {components}")
+        optimizer.zero_grad(set_to_none=True)
 
     return total_loss / (n_batches + 1e-8)
 

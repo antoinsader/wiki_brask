@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from models.EntityExtractor import EntityExtractor
 from training.config import MODEL_OUTPUT_KEYS
@@ -80,7 +81,7 @@ class FuseExtractor(nn.Module):
 class BraskModel(nn.Module):
     """Full BRASK model with forward and backward triple extraction."""
 
-    def __init__(self, hidden_dim: int, transe_rel_dim: int):
+    def __init__(self, hidden_dim: int, transe_rel_dim: int, use_grad_checkpoint: bool = True):
         super().__init__()
         self.fwd_head_predictor     = EntityExtractor(hidden_dim)
         self.bwd_tail_predictor     = EntityExtractor(hidden_dim)
@@ -91,6 +92,7 @@ class BraskModel(nn.Module):
         self.fwd_tail_predictor     = EntityExtractor(hidden_dim)
         self.bwd_head_predictor     = EntityExtractor(hidden_dim)
         self.inference_threshold    = 0.5
+        self.use_grad_checkpoint    = use_grad_checkpoint
 
     def forward(
         self,
@@ -165,11 +167,16 @@ class BraskModel(nn.Module):
                 self.inference_threshold,
             )                                              # (B, S_bwd, H), (B, S_bwd)
 
-        forward_hijk  = self.fwd_fuse_extractor(X, forward_c,  sk_fwd, sk_fwd_mask)   # (B, K, S_fwd, L, H)
-        backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_bwd, sk_bwd_mask)   # (B, K, S_bwd, L, H)
-
-        fwd_tail_start, fwd_tail_end = self.fwd_tail_predictor(forward_hijk)   # (B, K, S_fwd, L, 1)
-        bwd_head_start, bwd_head_end = self.bwd_head_predictor(backward_hijk)  # (B, K, S_bwd, L, 1)
+        if self.use_grad_checkpoint and self.training:
+            forward_hijk  = checkpoint(self.fwd_fuse_extractor, X, forward_c,  sk_fwd, sk_fwd_mask,  use_reentrant=False)
+            backward_hijk = checkpoint(self.bwd_fuse_extractor, X, backward_c, sk_bwd, sk_bwd_mask,  use_reentrant=False)
+            fwd_tail_start, fwd_tail_end = checkpoint(self.fwd_tail_predictor, forward_hijk,  use_reentrant=False)
+            bwd_head_start, bwd_head_end = checkpoint(self.bwd_head_predictor, backward_hijk, use_reentrant=False)
+        else:
+            forward_hijk  = self.fwd_fuse_extractor(X, forward_c,  sk_fwd, sk_fwd_mask)   # (B, K, S_fwd, L, H)
+            backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_bwd, sk_bwd_mask)   # (B, K, S_bwd, L, H)
+            fwd_tail_start, fwd_tail_end = self.fwd_tail_predictor(forward_hijk)   # (B, K, S_fwd, L, 1)
+            bwd_head_start, bwd_head_end = self.bwd_head_predictor(backward_hijk)  # (B, K, S_bwd, L, 1)
 
         return {
             MOK["FORWARD_HEAD_START"]:    fwd_head_start_logits.squeeze(-1),  # (B, L)

@@ -9,7 +9,8 @@ CHECKPOINTS_DIR = "checkpoints/"
 LEARNING_RATE_STAGE_1 = 1e-4
 LEARNING_RATE_STAGE_2 = 1e-5
 
-BATCH_SIZE           = 8
+BATCH_SIZE           = 4
+GRAD_ACCUM_STEPS     = 2   # effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
 STAGE1_EPOCHS        = 100
 STAGE2_EPOCHS        = 100
 STAGE3_EPOCHS        = 128
