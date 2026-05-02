@@ -11,13 +11,13 @@ class RelationAttention(nn.Module):
 
     def __init__(self, hidden_dim: int, rel_dim: int, attention_dim: int = 256):
         super().__init__()
+        self.w_x = nn.Linear(hidden_dim, attention_dim)
         self.w_r = nn.Linear(rel_dim,    attention_dim)
         self.w_g = nn.Linear(hidden_dim, attention_dim)
-        self.w_x = nn.Linear(hidden_dim, attention_dim)
         self.V   = nn.Linear(attention_dim, 1)
 
     def forward(self, X, relation_embedding, tokens_mean_embedding, mask):
-        """
+        """Which tokens matter most for this relation? summing the embeddings weighted by how much they matter
         X                    : (B, L, H)
         relation_embedding   : (R, rel_dim)
         tokens_mean_embedding: (B, H)
@@ -46,8 +46,8 @@ class FuseExtractor(nn.Module):
 
     def __init__(self, hidden_dim: int):
         super().__init__()
-        self.w_s = nn.Linear(hidden_dim, hidden_dim)
         self.w_x = nn.Linear(hidden_dim, hidden_dim)
+        self.w_s = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(
         self,
@@ -102,53 +102,88 @@ class BraskModel(nn.Module):
         semantic_rel_emb,
         transe_rel_emb,
     ) -> dict:
+        """Run one forward pass of the full BRASK model.
+
+        Parameters
+        ----------
+        X : (B, L, H)
+            Token embeddings from the description encoder.
+        X_mean : (B, H)
+            Mean-pooled token embedding (global sentence representation).
+        mask : (B, L)
+            Padding mask — 1.0 for real tokens, 0.0 for padding.
+        golden_triples : list[list[((int,int), str, (int,int))]]
+            Length-B list of gold triples ``((hs, he), rel_str, (ts, te))`` per example.
+            Used only when teacher forcing is active.
+        teacher_forcing_ratio : float
+            Probability in [0, 1] of using gold spans to build sk instead of predicted spans.
+            1.0 = always gold (Stage 2), decays to 0.0 by end of Stage 3.
+        semantic_rel_emb : (K, H)
+            BERT-based relation embeddings for the K active relations in this batch.
+        transe_rel_emb : (K, transe_dim)
+            TransE relation embeddings for the K active relations in this batch.
+
+        Returns
+        -------
+        dict with keys from MODEL_OUTPUT_KEYS plus ``"sk_bwd"``, ``"sk_bwd_mask"``,
+        ``"unique_subjects_bwd"``:
+
+        - ``fwd_head_start`` / ``fwd_head_end``   : (B, L)        forward subject span logits
+        - ``bwd_tail_start`` / ``bwd_tail_end``   : (B, L)        backward object span logits
+        - ``fwd_tail_start`` / ``fwd_tail_end``   : (B, K, S, L)  forward object span logits
+        - ``bwd_head_start`` / ``bwd_head_end``   : (B, K, S, L)  backward subject span logits
+        - ``sk`` / ``sk_mask``                    : (B, S_fwd, H) / (B, S_fwd)  forward subject keys
+        - ``sk_bwd`` / ``sk_bwd_mask``            : (B, S_bwd, H) / (B, S_bwd) backward subject keys
+        - ``unique_subjects_batch``               : list[list[tuple]] forward subject spans per example
+        - ``unique_subjects_bwd``                 : list[list[tuple]] backward subject spans per example
+        """
         MOK = MODEL_OUTPUT_KEYS
 
-        fwd_head_start_logits, fwd_head_end_logits = self.fwd_head_predictor(X)
-        bwd_tail_start_logits, bwd_tail_end_logits = self.bwd_tail_predictor(X)
+        fwd_head_start_logits, fwd_head_end_logits = self.fwd_head_predictor(X)   # (B, L, 1), (B, L, 1)
+        bwd_tail_start_logits, bwd_tail_end_logits = self.bwd_tail_predictor(X)   # (B, L, 1), (B, L, 1)
 
-        forward_c,  _ = self.fwd_relation_attention(X, semantic_rel_emb, X_mean, mask)
-        backward_c, _ = self.bwd_relation_attention(X, transe_rel_emb,   X_mean, mask)
+        forward_c,  _ = self.fwd_relation_attention(X, semantic_rel_emb, X_mean, mask)  # (B, K, H)
+        backward_c, _ = self.bwd_relation_attention(X, transe_rel_emb,   X_mean, mask)  # (B, K, H)
 
         use_gold = torch.rand(1).item() < teacher_forcing_ratio
         if use_gold:
             sk_fwd, sk_fwd_mask, unique_subjects_fwd = build_sk_from_gold(
-                golden_triples, X, mask, use_tail=False)
+                golden_triples, X, mask, use_tail=False)   # (B, S_fwd, H), (B, S_fwd)
             sk_bwd, sk_bwd_mask, unique_subjects_bwd = build_sk_from_gold(
-                golden_triples, X, mask, use_tail=True)
+                golden_triples, X, mask, use_tail=True)    # (B, S_bwd, H), (B, S_bwd)
         else:
             sk_fwd, sk_fwd_mask, unique_subjects_fwd = build_sk_prediction(
                 X, mask,
                 fwd_head_start_logits.squeeze(-1),
                 fwd_head_end_logits.squeeze(-1),
                 self.inference_threshold,
-            )
+            )                                              # (B, S_fwd, H), (B, S_fwd)
             sk_bwd, sk_bwd_mask, unique_subjects_bwd = build_sk_prediction(
                 X, mask,
                 bwd_tail_start_logits.squeeze(-1),
                 bwd_tail_end_logits.squeeze(-1),
                 self.inference_threshold,
-            )
+            )                                              # (B, S_bwd, H), (B, S_bwd)
 
-        forward_hijk  = self.fwd_fuse_extractor(X, forward_c,  sk_fwd, sk_fwd_mask)
-        backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_bwd, sk_bwd_mask)
+        forward_hijk  = self.fwd_fuse_extractor(X, forward_c,  sk_fwd, sk_fwd_mask)   # (B, K, S_fwd, L, H)
+        backward_hijk = self.bwd_fuse_extractor(X, backward_c, sk_bwd, sk_bwd_mask)   # (B, K, S_bwd, L, H)
 
-        fwd_tail_start, fwd_tail_end = self.fwd_tail_predictor(forward_hijk)
-        bwd_head_start, bwd_head_end = self.bwd_head_predictor(backward_hijk)
+        fwd_tail_start, fwd_tail_end = self.fwd_tail_predictor(forward_hijk)   # (B, K, S_fwd, L, 1)
+        bwd_head_start, bwd_head_end = self.bwd_head_predictor(backward_hijk)  # (B, K, S_bwd, L, 1)
 
         return {
-            MOK["FORWARD_HEAD_START"]:    fwd_head_start_logits.squeeze(-1),
-            MOK["FORWARD_HEAD_END"]:      fwd_head_end_logits.squeeze(-1),
-            MOK["BACKWARD_TAIL_START"]:   bwd_tail_start_logits.squeeze(-1),
-            MOK["BACKWARD_TAIL_END"]:     bwd_tail_end_logits.squeeze(-1),
-            MOK["FORWARD_TAIL_START"]:    fwd_tail_start.squeeze(-1),
-            MOK["FORWARD_TAIL_END"]:      fwd_tail_end.squeeze(-1),
-            MOK["BACKWARD_HEAD_START"]:   bwd_head_start.squeeze(-1),
-            MOK["BACKWARD_HEAD_END"]:     bwd_head_end.squeeze(-1),
-            MOK["SK"]:                    sk_fwd,
-            MOK["SK_MASK"]:               sk_fwd_mask,
-            "sk_bwd":                     sk_bwd,
-            "sk_bwd_mask":                sk_bwd_mask,
-            MOK["unique_subjects_batch"]: unique_subjects_fwd,
-            "unique_subjects_bwd":        unique_subjects_bwd,
+            MOK["FORWARD_HEAD_START"]:    fwd_head_start_logits.squeeze(-1),  # (B, L)
+            MOK["FORWARD_HEAD_END"]:      fwd_head_end_logits.squeeze(-1),    # (B, L)
+            MOK["BACKWARD_TAIL_START"]:   bwd_tail_start_logits.squeeze(-1),  # (B, L)
+            MOK["BACKWARD_TAIL_END"]:     bwd_tail_end_logits.squeeze(-1),    # (B, L)
+            MOK["FORWARD_TAIL_START"]:    fwd_tail_start.squeeze(-1),         # (B, K, S_fwd, L)
+            MOK["FORWARD_TAIL_END"]:      fwd_tail_end.squeeze(-1),           # (B, K, S_fwd, L)
+            MOK["BACKWARD_HEAD_START"]:   bwd_head_start.squeeze(-1),         # (B, K, S_bwd, L)
+            MOK["BACKWARD_HEAD_END"]:     bwd_head_end.squeeze(-1),           # (B, K, S_bwd, L)
+            MOK["SK"]:                    sk_fwd,                             # (B, S_fwd, H)
+            MOK["SK_MASK"]:               sk_fwd_mask,                        # (B, S_fwd)
+            "sk_bwd":                     sk_bwd,                             # (B, S_bwd, H)
+            "sk_bwd_mask":                sk_bwd_mask,                        # (B, S_bwd)
+            MOK["unique_subjects_batch"]: unique_subjects_fwd,                # list[list[tuple]]
+            "unique_subjects_bwd":        unique_subjects_bwd,                # list[list[tuple]]
         }
