@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from helpers.resource_monitor import log_resource_usage
 from utils.files import init_mmap
 
 def get_rel_embs(relations_dict, bert_tokenizer, bert_model, batch_size, use_cuda, device):
@@ -90,11 +91,11 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     """Embed each sentence using BERT, saving (N,L,H) all_embs, (N,H) mean_embs, (N,L) masks.
 
     All three outputs are written directly to memory-mapped .npy files so that
-    no full-dataset tensor ever lives in CPU RAM. Pre-tokenizing the entire
-    corpus at once is avoided for the same reason — for millions of sentences
-    the BatchEncoding alone consumes tens of GB of Python objects.
-    The caller is expected to pass sentences already sorted by length so that
-    each batch gets good dynamic padding without sorting here.
+    no full-dataset tensor ever lives in CPU RAM (which would be tens of GB for
+    a large corpus). Tokenization is done upfront for the whole corpus (fast
+    with BertTokenizerFast), then padding is applied per-batch to the batch's
+    own max length (dynamic padding). The caller pre-sorts sentences by text
+    length so that each batch is similarly sized, minimising padding waste.
     """
     model = model.to(device)
     model.eval()
@@ -117,22 +118,21 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     mm_mean_embs = init_mmap(out_mean_embs, shape=(N, H),             dtype="float32")
     mm_all_masks = init_mmap(out_all_masks, shape=(N, max_length),    dtype="int64")
 
-    # ── Step 2: Embed one batch at a time, writing results immediately ────────
-    # We tokenize per batch (not all sentences upfront) for the same reason:
-    # tokenizer(all_sentences, ...) stores every token ID as a Python object,
-    # costing ~28 bytes per token — easily 10-20 GB for a large corpus.
-    # Dynamic padding still works because the caller pre-sorts by length.
+    # ── Step 2: Pre-tokenize all sentences (no padding yet) ───────────────────
+    # BertTokenizerFast processes the full corpus in seconds. Storing token IDs
+    # without padding keeps this structure small. We pad per-batch in step 3 so
+    # each batch only pads to its own longest sequence (dynamic padding), which
+    # the caller enables by pre-sorting sentences by text length before passing.
+    print("Pre-tokenizing...")
+    all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
+
+    # ── Step 3: Embed one batch at a time, writing results immediately ────────
     with torch.no_grad():
         for batch_num, start in enumerate(tqdm(range(0, N, batch_size), desc="Embedding sentences")):
             end = min(start + batch_size, N)
 
-            enc = tokenizer(
-                sentences[start:end],
-                padding=True,       # pad to this batch's longest sequence only
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
+            batch_enc = {k: all_enc[k][start:end] for k in all_enc}
+            enc = tokenizer.pad(batch_enc, padding=True, return_tensors="pt")
             input_ids      = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
 
@@ -157,6 +157,9 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
                 mm_all_embs.flush()
                 mm_mean_embs.flush()
                 mm_all_masks.flush()
+
+            if batch_num % 100 == 0:
+                log_resource_usage(batch_num, use_cuda)
 
     # ── Step 3: Final flush — data is already on disk, nothing to aggregate ──
     mm_all_embs.flush()
