@@ -130,12 +130,24 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     #! Here, the all_enc would take big space in cpu ram so if having less cpu memory, we should move the tokenization inside the batches
     all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
 
+
+    # ? Good function is here !
+    # pre-sort by order;;;; sort_order are sorted indexes by lengths, all_enc_sorted  is copying all_enc items according to the sort order
+    lengths    = [len(ids) for ids in all_enc["input_ids"]]
+    sort_order = sorted(range(N), key=lambda i: lengths[i])
+    all_enc_sorted = {k: [v[i] for i in sort_order] for k, v in all_enc.items()}
+    del all_enc
+
+
+
     with torch.no_grad():
         for batch_num, start in enumerate(tqdm(range(0, N, batch_size), desc="Embedding sentences")):
             end = min(start + batch_size, N)
 
-            batch_enc = {k: all_enc[k][start:end] for k in all_enc}
+
+            batch_enc = {k: all_enc_sorted[k][start:end] for k in all_enc_sorted}
             enc = tokenizer.pad(batch_enc, padding=True, return_tensors="pt")
+            original_indices = sort_order[start:end]
             input_ids      = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
 
@@ -150,6 +162,14 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
             )  # (B, H)
 
             B, L, _ = embs.shape
+            embs_np         = embs.cpu().half().numpy()          # (B, L, H)
+            mean_embs_np    = mean_embs.cpu().numpy()             # (B, H)
+            attn_mask_np    = attention_mask.cpu().numpy()        # (B, L)
+
+            for local_i, orig_i in enumerate(original_indices):
+                mm_all_embs[orig_i, :L]  = embs_np[local_i]
+                mm_mean_embs[orig_i]      = mean_embs_np[local_i]
+                mm_all_masks[orig_i, :L]  = attn_mask_np[local_i]
             mm_all_embs[start:end, :L]  = embs.cpu().half().numpy()
             mm_mean_embs[start:end]      = mean_embs.cpu().numpy()
             mm_all_masks[start:end, :L]  = attention_mask.cpu().numpy()
