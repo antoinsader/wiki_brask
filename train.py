@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 
 from models.BraskModel import BraskModel
 from training.config import (
-    BATCH_SIZE, CHECKPOINTS_DIR, EARLY_STOP_PATIENCE,
+    BATCH_SIZE, CHECKPOINTS_DIR, EARLY_STOP_PATIENCE_STAGES,
     NUM_WORKERS, STAGE1_EPOCHS, STAGE2_EPOCHS, STAGE3_EPOCHS, VAL_SPLIT, device, use_cuda,
 )
 from training.dataset import BraskDataset, collate_fn
@@ -22,7 +22,9 @@ def parse_args():
     p.add_argument("--stage2-epochs",       type=int,   default=STAGE2_EPOCHS)
     p.add_argument("--stage3-epochs",       type=int,   default=STAGE3_EPOCHS)
     p.add_argument("--val-split",           type=float, default=VAL_SPLIT)
-    p.add_argument("--early-stop-patience", type=int,   default=EARLY_STOP_PATIENCE)
+    p.add_argument("--early_stop_patience_stage_1", type=int,   default=EARLY_STOP_PATIENCE_STAGES[0])
+    p.add_argument("--early_stop_patience_stage_2", type=int,   default=EARLY_STOP_PATIENCE_STAGES[1])
+    p.add_argument("--early_stop_patience_stage_3", type=int,   default=EARLY_STOP_PATIENCE_STAGES[2])
     return p.parse_args()
 
 
@@ -54,7 +56,9 @@ def main():
     stage2_epochs       = args.stage2_epochs
     stage3_epochs       = args.stage3_epochs
     val_split           = args.val_split
-    early_stop_patience = args.early_stop_patience
+    early_stop_patience_stage_1 = args.early_stop_patience_stage_1
+    early_stop_patience_stage_2 = args.early_stop_patience_stage_2
+    early_stop_patience_stage_3 = args.early_stop_patience_stage_3
 
     ckpt_best   = {s: os.path.join(CHECKPOINTS_DIR, f"brask_stage{s}_best.pt")   for s in (1, 2, 3)}
     ckpt_resume = {s: os.path.join(CHECKPOINTS_DIR, f"brask_stage{s}_resume.pt") for s in (1, 2, 3)}
@@ -147,11 +151,11 @@ def main():
             else:
                 no_improve += 1
 
-            early_stopped = no_improve >= early_stop_patience
+            early_stopped = no_improve >= early_stop_patience_stage_1
             _save_resume(ckpt_resume[1], model, optimizer, scaler, epoch, best_val_loss, no_improve,
                          done=(epoch == stage1_epochs - 1 or early_stopped))
             if early_stopped:
-                print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
+                print(f"  Early stopping after {early_stop_patience_stage_1} epochs without improvement.")
                 break
 
         model.load_state_dict(torch.load(ckpt_best[1], map_location=device))
@@ -196,11 +200,11 @@ def main():
             else:
                 no_improve += 1
 
-            early_stopped = no_improve >= early_stop_patience
+            early_stopped = no_improve >= early_stop_patience_stage_2
             _save_resume(ckpt_resume[2], model, optimizer, scaler, epoch, best_val_loss, no_improve,
                          done=(epoch == stage2_epochs - 1 or early_stopped))
             if early_stopped:
-                print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
+                print(f"  Early stopping after {early_stop_patience_stage_2} epochs without improvement.")
                 break
 
         model.load_state_dict(torch.load(ckpt_best[2], map_location=device))
@@ -247,11 +251,11 @@ def main():
             else:
                 no_improve += 1
 
-            early_stopped = no_improve >= early_stop_patience
+            early_stopped = no_improve >= early_stop_patience_stage_3
             _save_resume(ckpt_resume[3], model, optimizer, scaler, epoch, best_val_loss, no_improve,
                          done=(epoch == stage3_epochs - 1 or early_stopped))
             if early_stopped:
-                print(f"  Early stopping after {early_stop_patience} epochs without improvement.")
+                print(f"  Early stopping after {early_stop_patience_stage_3} epochs without improvement.")
                 break
 
     print("\nTraining complete.")

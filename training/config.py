@@ -15,8 +15,8 @@ STAGE1_EPOCHS        = 100
 STAGE2_EPOCHS        = 100
 STAGE3_EPOCHS        = 128
 VAL_SPLIT            = 0.1
-EARLY_STOP_PATIENCE  = 10
-
+#list[int] for each stage 1,2,3
+EARLY_STOP_PATIENCE_STAGES = [10,40, 40]
 # Tune if model predicts all zeros (increase) or all ones (decrease)
 POS_WEIGHT_ENTITY = 7.9
 POS_WEIGHT_OBJ    = 7.9
