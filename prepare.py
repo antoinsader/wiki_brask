@@ -23,7 +23,6 @@ from operations.normalizer import Normalizer
 use_cuda = torch.cuda.is_available()
 device_str = "cuda" if use_cuda else "cpu"
 device = torch.device(device_str)
-num_workers = 4 if use_cuda else 0
 descriptions_max_length = 256
 
 rel_embs_batch_size = 8192 if use_cuda else 32
@@ -116,7 +115,7 @@ def minimmizing_triples(minimized_triples_ids, raw_fp, min_files):
     del triples_min
     return relation_ids_min, tails_entity_ids_min
 
-def minimize(minimized_triples_ids):
+def minimize(minimized_triples_ids: set):
 
     min_files = settings.MINIMIZED_FILES
     raw_fp = settings.RAW_FILES.TRIPLES_TRAIN
@@ -131,19 +130,20 @@ def minimize(minimized_triples_ids):
 
 
     print("minimizing aliases")
+    # or
+    keep_ids = minimized_triples_ids | tails_entity_ids_min
     aliases_all = data_loader.get_aliases(minimized=False)
-    aliases_min = {}
-    for ent_id, als_lst in aliases_all.items():
-        if ent_id not in minimized_triples_ids and ent_id not in tails_entity_ids_min:
-            continue
-        _lst = [als for als in als_lst if als.strip() != ""]
-        if _lst:
-            aliases_min[ent_id] = _lst
+    aliases_min = {
+        ent_id: _lst
+        for ent_id, als_lst in tqdm(aliases_all.items(), total=len(aliases_all), desc=f"Reading aliases")
+        if ent_id in keep_ids
+        and (_lst := [als for als in als_lst if als.strip()])
+    }
 
     cache_array(aliases_min, min_files.ALIASES)
     print(f"\t Aliases minimization finished: {len(aliases_min):,} -> {min_files.ALIASES}")
     del aliases_all, aliases_min, tails_entity_ids_min
-    
+
 
     print("minimizing relations")
     relations_all = data_loader.get_relations(minimized=False)
