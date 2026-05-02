@@ -5,7 +5,7 @@ import random
 import torch
 from torch.utils.data import DataLoader
 
-from logging.experiment_logger import ExperimentLogger
+from experiment_logging.experiment_logger import ExperimentLogger
 from models.BraskModel import BraskModel
 from training.config import (
     BATCH_SIZE, CHECKPOINTS_DIR, EARLY_STOP_PATIENCE_STAGES,

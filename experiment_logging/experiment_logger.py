@@ -4,7 +4,7 @@ import secrets
 from datetime import datetime
 
 
-EXPERIMENTS_DIR = os.path.join(os.path.dirname(__file__), "experiments")
+EXPERIMENTS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs", "experiments")
 
 #! Not so dynamic, but will do the work
 
