@@ -102,7 +102,7 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     # 512 was tuned for a 24 GB 3090. V100-SXM3-32GB has more VRAM and higher
     # FP16 Tensor Core throughput — 2048 keeps the GPU fed without OOM even at
     # max_length=256. Reduce if you hit CUDA OOM on shorter-VRAM hardware.
-    batch_size = 2048 if use_cuda else 32
+    batch_size = 1024 if use_cuda else 32
 
     N = len(sentences)
     H = model.config.hidden_size
@@ -129,7 +129,7 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
     print("Pre-tokenizing...")
     #! Here, the all_enc would take big space in cpu ram so if having less cpu memory, we should move the tokenization inside the batches
     all_enc = tokenizer(sentences, padding=False, truncation=True, max_length=max_length)
-
+    del sentences
 
     # ? Good function is here !
     # pre-sort by order;;;; sort_order are sorted indexes by lengths, all_enc_sorted  is copying all_enc items according to the sort order
@@ -170,9 +170,6 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
                 mm_all_embs[orig_i, :L]  = embs_np[local_i]
                 mm_mean_embs[orig_i]      = mean_embs_np[local_i]
                 mm_all_masks[orig_i, :L]  = attn_mask_np[local_i]
-            mm_all_embs[start:end, :L]  = embs.cpu().half().numpy()
-            mm_mean_embs[start:end]      = mean_embs.cpu().numpy()
-            mm_all_masks[start:end, :L]  = attention_mask.cpu().numpy()
 
             # Flush dirty mmap pages to disk every 50 batches so the OS page
             # cache does not silently accumulate gigabytes of unwritten data.
@@ -180,15 +177,17 @@ def save_descriptions_embedding(tokenizer, model, sentences: list[str], device, 
             mm_mean_embs.flush()
             mm_all_masks.flush()
             #! Works only on linux
-            drop_mmap_pages(mm_all_embs,  start, end)
-            drop_mmap_pages(mm_mean_embs, start, end)
-            drop_mmap_pages(mm_all_masks, start, end)
+            min_orig = min(original_indices)
+            max_orig = max(original_indices) + 1
+            drop_mmap_pages(mm_all_embs,  min_orig, max_orig)
+            drop_mmap_pages(mm_mean_embs, min_orig, max_orig)
+            drop_mmap_pages(mm_all_masks, min_orig, max_orig)
 
 
             if use_cuda:
                 torch.cuda.empty_cache()
-        if batch_num % 100 == 0:
-            log_resource_usage(batch_num, use_cuda)
+            if batch_num % 100 == 0:
+                log_resource_usage(batch_num, use_cuda)
 
 
     mm_all_embs.flush()
